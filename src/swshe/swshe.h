@@ -297,8 +297,12 @@ static inline void init_timing_measurements(void)
 }
 #define KDF_START()         /* */
 #define KDF_END()           /* */
+#define CMAC_START()        /* */
+#define CMAC_END()          /* */
 #define AES_START()         /* */
 #define AES_END()           /* */
+#define GCM_START()         /* */
+#define GCM_END()           /* */
 #endif
 
 #endif // SM_SWSHE_H
