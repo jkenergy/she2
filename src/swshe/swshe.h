@@ -124,8 +124,8 @@ static inline uint32_t BYTE_SWAP(uint32_t w)
 
 #define BLOCK_SWAP(b)       ((b)[0] = BYTE_SWAP((b)[0]), (b)[1] = BYTE_SWAP((b)[1]), (b)[2] = BYTE_SWAP((b)[2]), (b)[3] = BYTE_SWAP((b)[3]))
 
-#define BLOCK_COPY(f, t)        ((t)->words[0] = (f)->words[0], (t)->words[1] = (f)->words[1], (t)->words[2] = (f)->words[2], (t)->words[3] = (f)->words[3])
-#define BLOCK_ZERO(b)           ((b)->words[0] = (b)->words[1] = (b)->words[2] = (b)->words[3] = 0)
+#define BLOCK_COPY(f, t)    ((t)->words[0] = (f)->words[0], (t)->words[1] = (f)->words[1], (t)->words[2] = (f)->words[2], (t)->words[3] = (f)->words[3])
+#define BLOCK_ZERO(b)       ((b)->words[0] = (b)->words[1] = (b)->words[2] = (b)->words[3] = 0)
 
 static inline uint32_t ror1(uint32_t x)
 {

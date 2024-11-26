@@ -4,6 +4,11 @@
 
 #include "swshe.h"
 
+// FIXME remove
+// #include <stdio.h>
+// void printf_block(sm_block_t *block);
+// void printf_bytes(const uint8_t *b, size_t l);
+
 // Don't mark these as const because they should go into RAM to avoid flash memory delays
 static uint32_t last4[16] = {
     0x00000000U, 0x1c200000U, 0x38400000U, 0x24600000U, 0x70800000U, 0x6ca00000U, 0x48c00000U, 0x54e00000U,
@@ -20,6 +25,7 @@ typedef struct {
     uint32_t len;
     uint32_t aad_len;
 } gcm_context_t;
+
 
 // Precompute the table for multiplying by H. This has to be run each time there
 // might be a new AES-GCM key. It consists of one AES operation plus creating the
@@ -124,6 +130,12 @@ static void FAST_CODE gcm_start(gcm_context_t *ctx,
     // Encrypt the IV (used at the end)
     sm_aes_encrypt(ctx->aes_key, &ctx->y, &ctx->enc_iv);
 
+    // FIXME remove
+    // printf("AAD:\n");
+    // printf_bytes(aad, aad_len);
+    // printf("AO plaintext:\n");
+    // printf_bytes(ao_plaintext, ao_plaintext_len);
+    
     // Feed in the AAD to GHASH
     while(aad_total_len > 0) {
         size_t len = (aad_total_len < 16U) ? aad_total_len : 16U;  // Capped at a block size
@@ -138,9 +150,97 @@ static void FAST_CODE gcm_start(gcm_context_t *ctx,
             p++;
             seg_len--;
         }
+        // FIXME remove
+        // printf("ctx buf:\n");
+        // printf_block(&ctx->buf);
         gcm_mult(ctx);
         aad_total_len -= len;
     }
+}
+
+void FAST_CODE ALT_gcm_start(gcm_context_t *ctx,
+                                    const sm_block_t *iv)
+{
+    ctx->len = 0;
+    ctx->aad_len = 0;
+    BLOCK_ZERO(&ctx->buf);
+    BLOCK_COPY(iv, &ctx->y);
+    // Set the counter part of the IV to 1
+    ctx->y.words[3] = BIG_ENDIAN_WORD(1);
+    // Encrypt the IV (used at the end)
+    sm_aes_encrypt(ctx->aes_key, &ctx->y, &ctx->enc_iv);
+}
+
+// Called repeatedly with data, up to 16 bytes in length. Must only
+// call with less than 16 bytes if this is the last part of the AAD,
+// and THE BLOCK MUST BE 0 PADDED.
+void FAST_CODE ALT_gcm_add_aad(gcm_context_t *ctx,
+                                  sm_block_t *aad,              // Additional Authenticated Data
+                                  size_t aad_len)               // Must be <= 16, and if < 16 then this is the final part of AAD
+{
+    // Feed in the AAD to GHASH
+    ctx->buf.words[0] ^= aad->words[0];
+    ctx->buf.words[1] ^= aad->words[1];
+    ctx->buf.words[2] ^= aad->words[2];
+    ctx->buf.words[3] ^= aad->words[3]; 
+    // FIXME remove 
+    // printf("ctx buf:\n");  
+    // printf_block(&ctx->buf);
+    gcm_mult(ctx);
+    ctx->aad_len += aad_len;
+}
+
+// Called repeatedly with data, up to 16 bytes in length. Must only
+// call with less than 16 bytes if this is the last part of the data.
+// No padding is necessary.
+void FAST_CODE ALT_gcm_add_data(gcm_context_t *ctx,
+                                 size_t length,          // length, in bytes, of data to process
+                                 const uint8_t *input,   // pointer to source data
+                                 uint8_t *output,        // pointer to destination data
+                                 bool encrypt)        
+{
+    sm_block_t ectr;    // counter-mode cipher output for XORing
+
+    ctx->len += length; // bump the GCM context's running length count
+
+    // Increment the counter part of the IV block
+    uint32_t cnt = BIG_ENDIAN_WORD(ctx->y.words[3]);
+    cnt++;
+    ctx->y.words[3] = BIG_ENDIAN_WORD(cnt);
+
+    // encrypt the context's 'y' vector under the established key
+    sm_aes_encrypt(ctx->aes_key, &ctx->y, &ectr);
+
+    // if( ( ret = aes_cipher( &ctx->aes_ctx, ctx->y, ectr ) ) != 0 )
+    //     return( ret );
+
+    // We use a byte-by-byte operation here because there might not be
+    // a whole block of input/output, and the input and/or output might not be
+    // word aligned.
+    if (encrypt) {
+        for(size_t i = 0; i < length; i++) {   
+            // XOR the cipher's ouptut vector (ectr) with our input
+            output[i] = ectr.bytes[i] ^ input[i];
+            // now we mix in our data into the authentication hash.
+            // if we're ENcrypting we XOR in the post-XOR (output) 
+            // results, but if we're DEcrypting we XOR in the input 
+            // data
+            ctx->buf.bytes[i] ^= output[i];
+        }
+    }
+    else {
+        for(size_t i = 0; i < length; i++) {   
+            // but if we're DEcrypting we XOR in the input data first, 
+            // i.e. before saving to ouput data, otherwise if the input 
+            // and output buffer are the same (inplace decryption) we 
+            // would not get the correct auth tag
+            ctx->buf.bytes[i] ^= input[i];
+            // XOR the cipher's output vector (ectr) with our input
+            output[i] = ectr.bytes[i] ^ input[i];
+        }
+    }
+
+    gcm_mult(ctx);    // perform a carryless multiply operation
 }
 
 static void FAST_CODE gcm_update(gcm_context_t *ctx,
@@ -274,6 +374,199 @@ she_errorcode_t sm_enc_aead(sm_key_id_t key_id,
 
     // Have the roundkey now for AES 
     gcm_setkey(&ctx, roundkey);
+    ALT_gcm_start(&ctx, iv);
+        
+    // Now fill in multiple 16 byte blocks of AAD and AO plaintext, except for the last one
+    size_t ao_length = ao ? length : 0;
+    const uint8_t *p = aad;
+    sm_block_t tmp;
+    size_t aad_total_len = aad_length + ao_length;
+    size_t seg_len = aad_length;
+
+    // FIXME remove
+    // printf("AAD:\n");
+    // printf_bytes(aad, aad_length);
+    // printf("Payload:\n");
+    // printf_bytes(plaintext, ao_length);
+    // printf("\n");
+
+    // Feed in the AAD and payload byte-by-byte (because alignment is not known)
+    while(aad_total_len > 0) {
+        size_t len = (aad_total_len < 16U) ? aad_total_len : 16U;  // Capped at a block size
+        BLOCK_ZERO(&tmp);
+        for(size_t i = 0; i < len; i++) {
+            if (seg_len == 0) {
+                seg_len = ao_length; // Payload length
+                p = plaintext;
+            }
+            // Have to do this byte-by-byte because we do not know if AAD is aligned
+            // or a whole number of words
+            tmp.bytes[i] ^= *p;
+            p++;
+            seg_len--;
+        }
+        // FIXME remove
+        // printf("tmp:\n");
+        // printf_block(&tmp);
+        ALT_gcm_add_aad(&ctx, &tmp, len);
+        aad_total_len -= len;
+    }
+
+    // Feed in the data byte-by-byte
+    size_t data_length = ao ? 0 : length;
+    while(data_length > 0) {
+        size_t len = (data_length < 16U) ? data_length : 16U;  // Capped at a block size
+        // Input = plaintext, output = ciphertext
+        ALT_gcm_add_data(&ctx, len, plaintext, ciphertext, true);
+        data_length -= len;
+        plaintext += len;
+        ciphertext += len;
+    }
+
+    // Finish up and generate the tag
+    gcm_finish(&ctx, tag);
+
+    return SHE_ERC_NO_ERROR;
+}
+
+she_errorcode_t sm_dec_aead(sm_key_id_t key_id,
+                            sm_block_t *iv,
+                            const uint8_t *aad,
+                            size_t aad_length,
+                            const uint8_t *ciphertext,
+                            uint8_t *plaintext,
+                            size_t length,
+                            sm_block_t *tag,
+                            size_t tag_length,
+                            bool *verified,
+                            bool ao)
+{
+    uint32_t tag_mask[4];
+    asrm_128(tag_mask, tag_length);
+
+    ////// Cannot use API unless the SHE has been initialized //////
+    if (!sm_prng_init) {
+        return SHE_ERC_GENERAL_ERROR;
+    }
+    if (key_id >= SM_SW_NUM_KEYS) {
+        return SHE_ERC_KEY_INVALID;
+    }
+    uint16_t flags = sm_sw_nvram_fs_ptr->key_slots[key_id].flags;
+    if (flags & SWSM_FLAG_EMPTY_SLOT) {
+        return SHE_ERC_KEY_EMPTY;
+    }
+    // Must be an AEAD key
+    if (flags & SHE_FLAG_COUNTER) {  // Verify-only for an AEAD key means that encode is not permitted
+        return SHE_ERC_KEY_INVALID;
+    }
+    if ((key_id < SHE_KEY_1 || key_id > SHE_KEY_10 || (sm_sw_nvram_fs_ptr->key_slots[key_id].flags & SHE_FLAG_KEY_USAGE)) && key_id != SHE_RAM_KEY) {
+        return SHE_ERC_KEY_INVALID;
+    }
+    if (!(flags & SHE_FLAG_AEAD) && key_id != SHE_RAM_KEY) {
+        return SHE_ERC_KEY_INVALID;
+    }
+#ifdef SM_KEY_EXPANSION_CACHED
+    const sm_aes_enc_roundkey_t *roundkey = &sm_cached_key_slots[key_id].enc_roundkey;
+#else
+    sm_aes_enc_roundkey_t expanded_roundkey;
+    sm_aes_enc_roundkey_t *roundkey = &expanded_roundkey;
+    sm_expand_key_enc(&sm_sw_nvram_fs_ptr->key_slots[key_id].key, roundkey);
+#endif
+
+    sm_block_t calculated_tag;
+    gcm_context_t ctx;
+
+    gcm_setkey(&ctx, roundkey);
+    ALT_gcm_start(&ctx, iv);
+
+    // Now fill in multiple 16 byte blocks of AAD and AO ciphertext (i.e. plaintext), except for the last one
+    size_t ao_length = ao ? length : 0;
+    const uint8_t *p = aad;
+    sm_block_t tmp;
+    size_t aad_total_len = aad_length + ao_length;
+    size_t seg_len = aad_length;
+
+    // Feed in the AAD and payload byte-by-byte (because alignment is not known)
+    while(aad_total_len > 0) {
+        size_t len = (aad_total_len < 16U) ? aad_total_len : 16U;  // Capped at a block size
+        BLOCK_ZERO(&tmp);
+        for(size_t i = 0; i < len; i++) {
+            if (seg_len == 0) {
+                seg_len = ao_length; // Payload length
+                p = ciphertext;
+            }
+            // Have to do this byte-by-byte because we do not know if AAD is aligned
+            // or a whole number of words
+            tmp.bytes[i] ^= *p;
+            p++;
+            seg_len--;
+        }
+        ALT_gcm_add_aad(&ctx, &tmp, len);
+        aad_total_len -= len;
+    }
+
+    // Feed in the data byte-by-byte (if AO then there is no data)
+    size_t data_length = ao ? 0 : length;
+    while(data_length > 0) {
+        size_t len = (data_length < 16U) ? data_length : 16U;  // Capped at a block size
+        // Input = ciphertext, output = plaintext
+        ALT_gcm_add_data(&ctx, len, ciphertext, plaintext, false);
+        data_length -= len;
+        plaintext += len;
+        ciphertext += len;
+    }
+
+    gcm_finish (&ctx, &calculated_tag);
+
+    uint32_t cmp = sm_compare_mac(tag, &calculated_tag, tag_mask);
+
+    *verified = cmp == 0;
+
+    return SHE_ERC_NO_ERROR;
+}
+
+she_errorcode_t OLD_sm_enc_aead(sm_key_id_t key_id,
+                           sm_block_t *iv,
+                           const uint8_t *aad,
+                           size_t aad_length,
+                           const uint8_t *plaintext,
+                           uint8_t *ciphertext,
+                           size_t length,
+                           sm_block_t *tag,
+                           bool ao)
+{
+    gcm_context_t ctx;
+    ////// Cannot use API unless the SHE has been initialized //////
+    if (!sm_prng_init) {
+        return SHE_ERC_GENERAL_ERROR;
+    }
+    if (key_id >= SM_SW_NUM_KEYS) {
+        return SHE_ERC_KEY_INVALID;
+    }
+    const uint16_t flags = sm_sw_nvram_fs_ptr->key_slots[key_id].flags;
+    if (flags & SWSM_FLAG_EMPTY_SLOT) {
+        return SHE_ERC_KEY_EMPTY;
+    }
+    // Verify-only key cannot be used, and counter key slots cannot be used
+    if ((flags & SHE_FLAG_VERIFY_ONLY) || (flags & SHE_FLAG_COUNTER)) {  // Verify-only for an AEAD key means that encode is not permitted
+        return SHE_ERC_KEY_INVALID;
+    }
+    if (((key_id < SHE_KEY_1) || (key_id > SHE_KEY_10) || (flags & SHE_FLAG_KEY_USAGE)) && (key_id != SHE_RAM_KEY)) {
+        return SHE_ERC_KEY_INVALID;
+    }
+    if (!(flags & SHE_FLAG_AEAD) && (key_id != SHE_RAM_KEY)) {
+        return SHE_ERC_KEY_INVALID;
+    }
+#ifdef SM_KEY_EXPANSION_CACHED
+    const sm_aes_enc_roundkey_t *roundkey = &sm_cached_key_slots[key_id].enc_roundkey;
+#else
+    sm_aes_enc_roundkey_t expanded_roundkey;
+    sm_aes_enc_roundkey_t *roundkey = &expanded_roundkey;
+    sm_expand_key_enc(&sm_sw_nvram_fs_ptr->key_slots[key_id].key, roundkey);
+#endif
+
+    // Have the roundkey now for AES 
+    gcm_setkey(&ctx, roundkey);
     if (ao) {
         gcm_start(&ctx, iv, aad, aad_length, plaintext, length);
         // Don't call update because no encryption takes place
@@ -287,7 +580,7 @@ she_errorcode_t sm_enc_aead(sm_key_id_t key_id,
     return SHE_ERC_NO_ERROR;
 }
 
-she_errorcode_t sm_dec_aead(sm_key_id_t key_id,
+she_errorcode_t OLD_sm_dec_aead(sm_key_id_t key_id,
                             sm_block_t *iv,
                             const uint8_t *aad,
                             size_t aad_length,

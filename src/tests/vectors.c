@@ -29,7 +29,7 @@
 #include "../nvram.h"
 
 #ifndef EMBEDDED
-void printf_bytes(uint8_t *b, size_t l)
+void printf_bytes(const uint8_t *b, size_t l)
 {
     for (uint32_t i = 0; i < l; i++) {
         printf("%02x", b[i]);
