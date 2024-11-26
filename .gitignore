@@ -50,3 +50,13 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# VSCode and CMake
+**/.vscode/**
+src/swshe/build/**
+src/swshe/CMakeFiles/**
+*.cmake
+CMakeCache.*
+compile_commands.json
+src/swshe/Makefile
+
