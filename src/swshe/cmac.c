@@ -5,6 +5,10 @@
 // This software is licensed according to the APACHE LICENSE 2.0:
 //
 // https://www.apache.org/licenses/LICENSE-2.0.txt
+//
+// Additions for AEAD key permissions.
+//
+// Copyright (C) 2024 JK Energy Ltd.
 
 #include "swshe.h"
 
@@ -87,11 +91,19 @@ she_errorcode_t FAST_CODE sm_generate_mac(sm_key_id_t key_id, const uint32_t *me
     if (!sm_prng_init) {
         return SHE_ERC_GENERAL_ERROR;
     }
-    if (sm_sw_nvram_fs_ptr->key_slots[key_id].flags & SWSM_FLAG_EMPTY_SLOT) {
+    if (key_id >= SM_SW_NUM_KEYS) {
+        return SHE_ERC_KEY_INVALID;
+    }
+    const uint16_t flags = sm_sw_nvram_fs_ptr->key_slots[key_id].flags;
+    if (flags & SWSM_FLAG_EMPTY_SLOT) {
         return SHE_ERC_KEY_EMPTY;
     }
-    if (sm_sw_nvram_fs_ptr->key_slots[key_id].flags & SHE_FLAG_KEY_USAGE) {
-        if (sm_sw_nvram_fs_ptr->key_slots[key_id].flags & SHE_FLAG_VERIFY_ONLY) {
+    if ((flags & SHE_FLAG_AEAD) || (flags & SHE_FLAG_COUNTER)) {
+        // A key slot used for a non-volatile counter or a AEAD encryption can't be used for this API call
+        return SHE_ERC_KEY_INVALID;
+    }
+    if (flags & SHE_FLAG_KEY_USAGE) {
+        if (flags & SHE_FLAG_VERIFY_ONLY) {
             return SHE_ERC_KEY_INVALID;
         }
     }
@@ -135,13 +147,14 @@ she_errorcode_t FAST_CODE sm_verify_mac(sm_key_id_t key_id, const uint32_t *mess
     if (!sm_prng_init) {
         return SHE_ERC_GENERAL_ERROR;
     }
-    if (sm_sw_nvram_fs_ptr->key_slots[key_id].flags & SWSM_FLAG_EMPTY_SLOT) {
+    if (key_id >= SM_SW_NUM_KEYS) {
+        return SHE_ERC_KEY_INVALID;
+    }
+    const uint16_t flags = sm_sw_nvram_fs_ptr->key_slots[key_id].flags;
+    if (flags & SWSM_FLAG_EMPTY_SLOT) {
         return SHE_ERC_KEY_EMPTY;
     }
-    if (sm_sw_nvram_fs_ptr->key_slots[key_id].flags & SHE_FLAG_KEY_USAGE) {
-        // Key OK to be used to verify
-    }
-    else {
+    if (!(flags & SHE_FLAG_KEY_USAGE) || (flags & SHE_FLAG_AEAD) || (flags & SHE_FLAG_COUNTER)) {
         return SHE_ERC_KEY_INVALID;
     }
     if (message_length & 0x7fU) {

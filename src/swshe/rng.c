@@ -6,6 +6,8 @@
 //
 // https://www.apache.org/licenses/LICENSE-2.0.txt
 //
+// Timing measurements Copyright (C) 2024 JK Energy Ltd.
+//
 // Created by ken on 02/11/16.
 
 #include "swshe.h"
@@ -27,7 +29,7 @@ she_errorcode_t FAST_CODE sm_init_rng(void)
         return rc;
     }
 
-    sm_sw_nvram_fs_ptr->key_slots[SHE_RAM_KEY].flags = SWSM_FLAG_EMPTY_SLOT | SWSM_FLAG_PLAIN_KEY;
+    sm_sw_nvram_fs_ptr->key_slots[SHE_RAM_KEY].flags = SWSM_FLAG_EMPTY_SLOT;
     // If key caching is enabled then also create the caches for the roundkey
     // Then create the cached k1 tweak
     sm_init_keys();
@@ -56,6 +58,7 @@ she_errorcode_t FAST_CODE sm_init_rng(void)
     sm_aes_encrypt(&sm_prng_roundkey, &current_seed, &sm_sw_nvram_fs_ptr->prng_seed);
 
     // 3. Flush back to NVRAM to ensure re-seeding is set for the next session
+    //    (Also will flush incremented counter key slots)
     rc = sm_sw_callback_nvram_store_key_slots();
     if (rc != SHE_ERC_NO_ERROR) {
         return rc;
@@ -68,6 +71,9 @@ she_errorcode_t FAST_CODE sm_init_rng(void)
 
     // Mark the RNG as being initialized
     sm_prng_init = true;
+
+    // Set up timing measurements
+    init_timing_measurements();
 
     return SHE_ERC_NO_ERROR;
 }

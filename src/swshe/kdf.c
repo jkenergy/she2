@@ -6,6 +6,8 @@
 //
 // https://www.apache.org/licenses/LICENSE-2.0.txt
 //
+// Refactoring Copyright (C) 2024 JK Energy Ltd.
+//
 // Created by ken on 02/11/16.
 
 #include "swshe.h"
@@ -30,18 +32,13 @@ void FAST_CODE sm_mp(const sm_block_t *out_prev, const sm_block_t *x, sm_block_t
 void FAST_CODE sm_kdf(const sm_block_t *k, sm_block_t *out, const sm_block_t *c)
 {
     sm_block_t out_prev;
-    out_prev.words[0] = 0;
-    out_prev.words[1] = 0;
-    out_prev.words[2] = 0;
-    out_prev.words[3] = 0;
+    BLOCK_ZERO(&out_prev);
 
     // Round 1 is the IV (zero) and the key
     sm_mp(&out_prev, k, out);
 
     // Round 2 adds the constant
-    out_prev.words[0] = out->words[0];
-    out_prev.words[1] = out->words[1];
-    out_prev.words[2] = out->words[2];
-    out_prev.words[3] = out->words[3];
+    BLOCK_COPY(out, &out_prev);
+
     sm_mp(&out_prev, c, out);
 }

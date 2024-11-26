@@ -17,6 +17,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #define SHE_SECRET_KEY                          (0U)
 #define SHE_MASTER_ECU_KEY                      (1U)
@@ -46,12 +47,14 @@
 #define SHE_INT_DEBUGGER                        (1U << 7)
 
 // Key flags
-#define SHE_FLAG_WRITE_PROTECTION_offset        (5U)
-#define SHE_FLAG_BOOT_PROTECTION_offset         (4U)
-#define SHE_FLAG_DEBUGGER_PROTECTION_offset     (3U)
-#define SHE_FLAG_KEY_USAGE_offset               (2U)
-#define SHE_FLAG_WILDCARD_offset                (1U)
-#define SHE_FLAG_VERIFY_ONLY_offset             (0U)
+#define SHE_FLAG_WRITE_PROTECTION_offset        (7U)
+#define SHE_FLAG_BOOT_PROTECTION_offset         (6U)
+#define SHE_FLAG_DEBUGGER_PROTECTION_offset     (5U)
+#define SHE_FLAG_KEY_USAGE_offset               (4U)  // Key used for CMAC, not AES
+#define SHE_FLAG_WILDCARD_offset                (3U)
+#define SHE_FLAG_VERIFY_ONLY_offset             (2U)
+#define SHE_FLAG_COUNTER_offset                 (1U)
+#define SHE_FLAG_AEAD_offset                    (0U)
 
 #define SHE_FLAG_WRITE_PROTECTION               (1U << SHE_FLAG_WRITE_PROTECTION_offset)
 #define SHE_FLAG_BOOT_PROTECTION                (1U << SHE_FLAG_BOOT_PROTECTION_offset)
@@ -59,6 +62,8 @@
 #define SHE_FLAG_KEY_USAGE                      (1U << SHE_FLAG_KEY_USAGE_offset)
 #define SHE_FLAG_WILDCARD                       (1U << SHE_FLAG_WILDCARD_offset)
 #define SHE_FLAG_VERIFY_ONLY                    (1U << SHE_FLAG_VERIFY_ONLY_offset)
+#define SHE_FLAG_COUNTER                        (1U << SHE_FLAG_COUNTER_offset)
+#define SHE_FLAG_AEAD                           (1U << SHE_FLAG_AEAD_offset)
 
 typedef enum {
     SHE_ERC_NO_ERROR = 0,
@@ -120,34 +125,6 @@ she_errorcode_t sm_verify_mac(sm_key_id_t key_id,
                               uint8_t mac_length,
                               bool *verification_status);
 
-// Maps on to the SHE 2.0 command CMD_INIT_GCM.
-// This initializes the AES-GCM function with the IV
-she_errorcode_t sm_enc_aes_gcm_init(sm_key_id_t key_id,
-                                    const sm_block_t *iv);
-
-// Maps on to the SHE 2.0 command CMD_GCM_AAD.
-// This adds additional authenticated data
-she_errorcode_t sm_enc_aes_gcm_aad(sm_key_id_t key_id,
-                                   const sm_block_t *aad);
-
-
-// Maps on to the SHE 2.0 command CMD_GCM_ENC_DATA.
-// This encrypts plaintext
-she_errorcode_t sm_enc_aes_gcm_enc_data(sm_key_id_t key_id,
-                                        const sm_block_t *plaintext,
-                                        sm_block_t *ciphertext);
-
-// Maps on to the SHE 2.0 command CMD_GCM_DEC_DATA.
-// This decrypts ciphertext
-she_errorcode_t sm_enc_aes_gcm_dec_data(sm_key_id_t key_id,
-                                        const sm_block_t *ciphertext,
-                                        sm_block_t *plaintext);
-
-// Maps on to the SHE 2.0 command CMD_GCM_TAG.
-// This produces the AEAD tag
-she_errorcode_t sm_enc_aes_gcm_tag(sm_key_id_t key_id,
-                                   const sm_block_t *tag);
-
 // This rolls the seed around to the next one in the sequence (the seed is a 128-bit block)
 // and ensures it is stored atomically in non-volatile storage; the call does not succeed until the store
 // is successful, and this should act as a gate on all other functionality of the security module (re-using
@@ -157,5 +134,34 @@ she_errorcode_t sm_init_rng(void);
 // Returns a random number (this is an operation using the secret key and the CSPRNG state produced
 // from the seed). Maps on to the SHE command CMD_RND.
 she_errorcode_t sm_rnd(sm_block_t *rn);
+
+she_errorcode_t sm_enc_aead(sm_key_id_t key_id,
+                            sm_block_t *iv,
+                            const uint8_t *aad,
+                            size_t aad_length,
+                            const uint8_t *plaintext,
+                            uint8_t *ciphertext,
+                            size_t length,
+                            sm_block_t *tag,
+                            bool ao);
+
+she_errorcode_t sm_dec_aead(sm_key_id_t key_id,
+                            sm_block_t *iv,
+                            const uint8_t *aad,
+                            size_t aad_length,
+                            const uint8_t *ciphertext,
+                            uint8_t *plaintext,
+                            size_t length,
+                            sm_block_t *tag,
+                            size_t tag_length,
+                            bool *verified,
+                            bool ao);
+
+she_errorcode_t sm_aead_kdf(sm_key_id_t key_id,
+                            uint8_t *context, 
+                            sm_key_id_t counter_id);
+
+she_errorcode_t sm_update_counter(sm_key_id_t counter_id,
+                                  uint32_t value);
 
 #endif //SM_HSM_H

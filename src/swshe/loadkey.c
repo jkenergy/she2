@@ -4,6 +4,8 @@
 //
 // This software is licensed according to the APACHE LICENSE 2.0:
 //
+// Additional AEAD permission checking Copyright (C) 2024 JK Energy Ltd.
+//
 // https://www.apache.org/licenses/LICENSE-2.0.txt
 //
 // Created by ken on 02/11/16.
@@ -57,7 +59,7 @@ she_errorcode_t FAST_CODE sm_load_key(const sm_block_t *m1, const sm_block_t *m2
     }
 
     // Get the current device ID into a block (MSB-aligned in a block)
-    sm_block_t device_uid = {{0, 0,0 ,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
+    sm_block_t device_uid = {{0, 0, 0 ,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
     she_errorcode_t rc;
     rc = sm_sw_callback_nvram_get_uid(device_uid.bytes);
     if (rc != SHE_ERC_NO_ERROR) {
@@ -79,10 +81,7 @@ she_errorcode_t FAST_CODE sm_load_key(const sm_block_t *m1, const sm_block_t *m2
     sm_block_t m1_uid; // 120 bits, MSB aligned
 
     // UID is top 128 bits of M1
-    m1_uid.words[0] = m1->words[0];
-    m1_uid.words[1] = m1->words[1];
-    m1_uid.words[2] = m1->words[2];
-    m1_uid.words[3] = m1->words[3];
+    BLOCK_COPY(m1, &m1_uid);
     m1_uid.bytes[15] = 0;
 
     // Step 2: Check the requested memory slot is not write protected
@@ -94,6 +93,15 @@ she_errorcode_t FAST_CODE sm_load_key(const sm_block_t *m1, const sm_block_t *m2
     // The key has to be one that can be authorized
     if ((sm_key_auth_table[memory_slot] & (1U << auth_id)) == 0) {
         // Key not authorized
+        return SHE_ERC_KEY_INVALID;
+    }
+    uint16_t flags = sm_sw_nvram_fs_ptr->key_slots[auth_id].flags;
+    if (flags & SWSM_FLAG_EMPTY_SLOT) {
+        return SHE_ERC_KEY_EMPTY;
+    }
+    // The authorizing slot must not be an AEAD or counter slot
+    if ((flags & SHE_FLAG_AEAD) || (flags & SHE_FLAG_COUNTER)) {
+        // A key slot used for a non-volatile counter or a AEAD encryption can't be used for this API call
         return SHE_ERC_KEY_INVALID;
     }
     // The key must not be empty (unless it is authorizing itself)
@@ -197,10 +205,10 @@ she_errorcode_t FAST_CODE sm_load_key(const sm_block_t *m1, const sm_block_t *m2
     m2_1_plaintext.words[3] ^= m2_0->words[3];
 
     // Step 6: Extract Counter, Key, F from decrypted M2
-    // Counter is 28 bits, F is 6 bits
+    // Counter is 28 bits, F is 7 bits
     uint32_t counter = BIG_ENDIAN_WORD(m2_0_plaintext.words[0]) >> 4; // 28-bits, MSB-aligned
-    uint8_t flags = (uint8_t)((m2_0_plaintext.bytes[3] & 0x0fU) << 2); // Four bits of flags in the first word, next 2 in the next word
-    flags |= (m2_0_plaintext.bytes[4] >> 6) & 0x3U;
+    flags = (uint16_t)((m2_0_plaintext.bytes[3] & 0x0fU) << 3); // Four bits of flags in the first word, next 3 in the next word
+    flags |= (m2_0_plaintext.bytes[4] >> 5) & 0x7U;
 
     // Step 7: Check counter > existing counter, store new key, counter, else fail
     if (counter > sm_sw_nvram_fs_ptr->key_slots[memory_slot].counter) {
@@ -208,26 +216,27 @@ she_errorcode_t FAST_CODE sm_load_key(const sm_block_t *m1, const sm_block_t *m2
         sm_sw_nvram_fs_ptr->key_slots[memory_slot].key = m2_1_plaintext;
         sm_sw_nvram_fs_ptr->key_slots[memory_slot].flags = flags;
 
-        // Update the cached roundkey and K1 tweak using the key for CMAC calculation
-        sm_aes_enc_roundkey_t *roundkey;
+        // If the key is not a counter then update the cached roundkey and K1 tweak using the key for CMAC calculation
+        if (!(flags & SHE_FLAG_COUNTER)) {
+            sm_aes_enc_roundkey_t *roundkey;
 #ifdef SM_KEY_EXPANSION_CACHED
-        roundkey = &sm_cached_key_slots[memory_slot].enc_roundkey;
+            roundkey = &sm_cached_key_slots[memory_slot].enc_roundkey;
 #else
-        sm_aes_enc_roundkey_t enc_roundkey;
-        roundkey = &enc_roundkey;
+            sm_aes_enc_roundkey_t enc_roundkey;
+            roundkey = &enc_roundkey;
 #endif
-        // Either temporary calculation or result pushed into the cache
-        sm_expand_key_enc(&m2_1_plaintext, roundkey);
+            // Either temporary calculation or result pushed into the cache
+            sm_expand_key_enc(&m2_1_plaintext, roundkey);
 
-        // Set the new key's K1 tweak value for the CMAC algorithm so that this can be used in a future CMAC call
-        sm_cmac_k1(roundkey, &sm_cached_key_slots[memory_slot].k1);
-
+            // Set the new key's K1 tweak value for the CMAC algorithm so that this can be used in a future CMAC call
+            sm_cmac_k1(roundkey, &sm_cached_key_slots[memory_slot].k1);
+        }
         // The RAM key always has a counter and flags of 0 so that it can always be set
         // NB: the "plain key" flag has not been set because it is not set through the plain key command
         // This might not be the roundkey but it's easier to just overwrite those values anyway
         sm_sw_nvram_fs_ptr->key_slots[SHE_RAM_KEY].counter = 0;
         sm_sw_nvram_fs_ptr->key_slots[SHE_RAM_KEY].flags = 0;
-
+        
         // Flush the file system back to NVRAM
         rc = sm_sw_callback_nvram_store_key_slots();
         if (rc != SHE_ERC_NO_ERROR) {

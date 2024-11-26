@@ -6,6 +6,8 @@
 //
 // https://www.apache.org/licenses/LICENSE-2.0.txt
 //
+// Refactoring Copyright (C) 2024 JK Energy Ltd.
+//
 // Created by ken on 02/11/16.
 
 #include "swshe.h"
@@ -14,26 +16,17 @@
 static void FAST_CODE prng_extend(const sm_block_t *prng, const sm_block_t *entropy, const sm_block_t *c, sm_block_t *out)
 {
     sm_block_t out_prev;
-    out_prev.words[0] = 0;
-    out_prev.words[1] = 0;
-    out_prev.words[2] = 0;
-    out_prev.words[3] = 0;
+    BLOCK_ZERO(&out_prev);
 
     // Round 1 is the IV (zero) and the state/seed
     sm_mp(&out_prev, prng, out);
 
     // Round 2 adds the entropy
-    out_prev.words[0] = out->words[0];
-    out_prev.words[1] = out->words[1];
-    out_prev.words[2] = out->words[2];
-    out_prev.words[3] = out->words[3];
+    BLOCK_COPY(out, &out_prev);
     sm_mp(&out_prev, entropy, out);
 
     // Round 3 adds the constant
-    out_prev.words[0] = out->words[0];
-    out_prev.words[1] = out->words[1];
-    out_prev.words[2] = out->words[2];
-    out_prev.words[3] = out->words[3];
+    BLOCK_COPY(out, &out_prev);
     sm_mp(&out_prev, c, out);
 }
 
@@ -62,16 +55,10 @@ she_errorcode_t FAST_CODE sm_extend_seed(const sm_block_t *entropy)
     sm_block_t out;
     // Will take three rounds of M-P to compress the state and seed
     prng_extend(&sm_prng_state, entropy, &prng_extension_c, &out);
-    sm_prng_state.words[0] = out.words[0];
-    sm_prng_state.words[1] = out.words[1];
-    sm_prng_state.words[2] = out.words[2];
-    sm_prng_state.words[3] = out.words[3];
+    BLOCK_COPY(&out, &sm_prng_state);
 
     prng_extend(&sm_sw_nvram_fs_ptr->prng_seed, entropy, &prng_extension_c, &out);
-    sm_sw_nvram_fs_ptr->prng_seed.words[0] = out.words[0];
-    sm_sw_nvram_fs_ptr->prng_seed.words[1] = out.words[1];
-    sm_sw_nvram_fs_ptr->prng_seed.words[2] = out.words[2];
-    sm_sw_nvram_fs_ptr->prng_seed.words[3] = out.words[3];
+    BLOCK_COPY(&out, &sm_sw_nvram_fs_ptr->prng_seed);
 
     // Flush the NVRAM back because the seed has changed and we don't want to lose this
     // on restart

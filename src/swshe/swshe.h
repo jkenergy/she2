@@ -6,6 +6,8 @@
 //
 // This software is licensed according to the APACHE LICENSE 2.0:
 //
+// Timing measurements Copyright (C) 2024 JK Energy Ltd.
+
 // https://www.apache.org/licenses/LICENSE-2.0.txt
 
 #ifndef SM_SWSHE_H
@@ -41,8 +43,8 @@
 #define FAST_CODE /* */ 
 #endif
 
-#define SWSM_FLAG_EMPTY_SLOT                        (1U << 7)
-#define SWSM_FLAG_PLAIN_KEY                         (1U << 6)
+#define SWSM_FLAG_EMPTY_SLOT                        (1U << 9)
+#define SWSM_FLAG_PLAIN_KEY                         (1U << 8)
 
 #ifdef SM_CPU_BIG_ENDIAN
 #define AES_CONST(c)   ((((c) >> 24) & 0x000000ff) | (((c) >> 8) & 0x0000ff00) | (((c) << 8) & 0x00ff0000) | (((c) << 24) & 0xff000000))
@@ -120,7 +122,10 @@ static inline uint32_t BYTE_SWAP(uint32_t w)
 }
 #endif
 
-#define BLOCK_SWAP(b)   ((b)[0] = BYTE_SWAP((b)[0]), (b)[1] = BYTE_SWAP((b)[1]), (b)[2] = BYTE_SWAP((b)[2]), (b)[3] = BYTE_SWAP((b)[3]))
+#define BLOCK_SWAP(b)       ((b)[0] = BYTE_SWAP((b)[0]), (b)[1] = BYTE_SWAP((b)[1]), (b)[2] = BYTE_SWAP((b)[2]), (b)[3] = BYTE_SWAP((b)[3]))
+
+#define BLOCK_COPY(f, t)        ((t)->words[0] = (f)->words[0], (t)->words[1] = (f)->words[1], (t)->words[2] = (f)->words[2], (t)->words[3] = (f)->words[3])
+#define BLOCK_ZERO(b)           ((b)->words[0] = (b)->words[1] = (b)->words[2] = (b)->words[3] = 0)
 
 static inline uint32_t ror1(uint32_t x)
 {
@@ -249,6 +254,51 @@ static void inline printf_buf(const uint8_t *buf)
     }
     printf("\n");
 }
+#endif
+
+#ifdef TIMING_MEASUREMENTS
+///////////
+// Performance measurement macros for using GPIO on an RP2040 Pico
+#include "pico/stdlib.h"
+
+#define KDF_GPIO            (2U)
+#define AES_GPIO            (3U)
+#define CMAC_GPIO           (4U)
+
+static inline void init_timing_measurements(void)
+{
+    // Set the trigger pin on the CANPico as a GPIO port, drive low
+    gpio_set_function(KDF_GPIO, GPIO_FUNC_SIO);
+    gpio_set_function(AES_GPIO, GPIO_FUNC_SIO);
+    gpio_set_function(CMAC_GPIO, GPIO_FUNC_SIO);
+    // Set direction: out
+    gpio_set_dir(KDF_GPIO, GPIO_OUT);
+    gpio_set_dir(AES_GPIO, GPIO_OUT);
+    gpio_set_dir(CMAC_GPIO, GPIO_OUT);
+    // Drive to 0
+    gpio_clr_mask(1U << KDF_GPIO);
+    gpio_clr_mask(1U << AES_GPIO);
+    gpio_clr_mask(1U << CMAC_GPIO);
+}
+
+#define GCM_START()         (sio_hw->gpio_set = (1U << KDF_GPIO))
+#define GCM_END()           (sio_hw->gpio_clr = (1U << KDF_GPIO))
+#define KDF_START()         (sio_hw->gpio_set = (1U << KDF_GPIO))
+#define KDF_END()           (sio_hw->gpio_clr = (1U << KDF_GPIO))
+#define AES_START()         (sio_hw->gpio_set = (1U << AES_GPIO))
+#define AES_END()           (sio_hw->gpio_clr = (1U << AES_GPIO))
+#define CMAC_START()        (sio_hw->gpio_set = (1U << CMAC_GPIO))
+#define CMAC_END()          (sio_hw->gpio_clr = (1U << CMAC_GPIO))
+///////////
+#else // TIMING_MEASUREMENTS
+static inline void init_timing_measurements(void)
+{
+    /* */
+}
+#define KDF_START()         /* */
+#define KDF_END()           /* */
+#define AES_START()         /* */
+#define AES_END()           /* */
 #endif
 
 #endif // SM_SWSHE_H

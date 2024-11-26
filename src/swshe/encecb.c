@@ -4,6 +4,8 @@
 //
 // https://www.apache.org/licenses/LICENSE-2.0.txt
 //
+// Additional AEAD permission checking Copyright (C) 2024 JK Energy Ltd.
+
 #include "swshe.h"
 
 // We put these constants in RAM so accesses are achieved in constant time on an MCU
@@ -170,7 +172,7 @@ static void forward_round_last(uint32_t x[], const uint8_t y[], const uint32_t r
 //
 // __attribute__( ( long_call, section(".data") ) ) void encrypt(const aes_roundkey_t *roundkey, const struct aes_block *plaintext, struct aes_block *ciphertext)
 void FAST_CODE sm_aes_encrypt(const sm_aes_enc_roundkey_t *roundkey, const sm_block_t *plaintext, sm_block_t *ciphertext)
-{       
+{   
     uint32_t x[4];
     uint32_t y[4];
 
@@ -221,8 +223,13 @@ she_errorcode_t FAST_CODE sm_enc_ecb(sm_key_id_t key_id, const sm_block_t *plain
     if (!sm_prng_init) {
         return SHE_ERC_GENERAL_ERROR;
     }
-    if (sm_sw_nvram_fs_ptr->key_slots[key_id].flags & SWSM_FLAG_EMPTY_SLOT) {
+    const uint16_t flags = sm_sw_nvram_fs_ptr->key_slots[key_id].flags;
+    if (flags & SWSM_FLAG_EMPTY_SLOT) {
         return SHE_ERC_KEY_EMPTY;
+    }
+    if ((flags & SHE_FLAG_AEAD) || (flags & SHE_FLAG_COUNTER)) {
+        // A key slot used for a non-volatile counter or a AEAD encryption can't be used for this API call
+        return SHE_ERC_KEY_INVALID;
     }
     if ((key_id < SHE_KEY_1 || key_id > SHE_KEY_10 || (sm_sw_nvram_fs_ptr->key_slots[key_id].flags & SHE_FLAG_KEY_USAGE)) && key_id != SHE_RAM_KEY) {
         return SHE_ERC_KEY_INVALID;

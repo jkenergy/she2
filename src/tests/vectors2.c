@@ -5,6 +5,8 @@
 // This software is licensed according to the APACHE LICENSE 2.0:
 //
 // https://www.apache.org/licenses/LICENSE-2.0.txt
+//
+// Flag refactoring Copyright (C) 2024 JK Energy Ltd.
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -51,7 +53,7 @@ void test3(void)
                                      0xab, 0xf7, 0x15, 0x88,
                                      0x09, 0xcf, 0x4f, 0x3c}};
 
-    sm_sw_nvram_backdoor_set_key(SHE_KEY_3, &cmac_key, true);
+    sm_sw_nvram_backdoor_set_key(SHE_KEY_3, &cmac_key, SHE_FLAG_KEY_USAGE);
 
     bytes16_t message1 = {.bytes = {0x6b, 0xc1, 0xbe, 0xe2,                        
                                     0x2e, 0x40, 0x9f, 0x96,
@@ -138,7 +140,7 @@ void test3(void)
                                       0x19, 0x1a, 0x1b, 0x1c,
                                       0x1d, 0x1e, 0x1f, 0x20}};
 
-    sm_sw_nvram_backdoor_set_key(SHE_KEY_3, &key_0x87, true);
+    sm_sw_nvram_backdoor_set_key(SHE_KEY_3, &key_0x87, SHE_FLAG_KEY_USAGE);
     rc = sm_generate_mac(SHE_KEY_3, &message2.word, 256U, &mac);
     if (rc) {
         printf("TEST FAILED: unexpected return code ");

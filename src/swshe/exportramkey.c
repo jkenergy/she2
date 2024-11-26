@@ -6,6 +6,8 @@
 //
 // https://www.apache.org/licenses/LICENSE-2.0.txt
 //
+// Additional key permissions Copyright (C) 2024 JK Energy Ltd.
+//
 // Created by ken on 02/11/16.
 
 #include "swshe.h"
@@ -25,6 +27,14 @@ she_errorcode_t FAST_CODE sm_export_ram_key(sm_block_t *m1, sm_block_t *m2_0, sm
     ////// Cannot use API unless the SHE has been initialized //////
     if (!sm_prng_init) {
         return SHE_ERC_GENERAL_ERROR;
+    }
+    ////// Cannot export a RAM key unless it is not empty and a plain key
+    const uint16_t flags = sm_sw_nvram_fs_ptr->key_slots[SHE_RAM_KEY].flags;
+    if (flags & SWSM_FLAG_EMPTY_SLOT) {
+        return SHE_ERC_KEY_EMPTY;
+    }
+    if (!(flags & SWSM_FLAG_PLAIN_KEY)) {
+        return SHE_ERC_KEY_INVALID;
     }
 
     ////// KEY_UPDATE_ENC_C //////

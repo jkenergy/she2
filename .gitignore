@@ -58,5 +58,6 @@ src/swshe/CMakeFiles/**
 *.cmake
 CMakeCache.*
 compile_commands.json
-src/swshe/Makefile
-
+src/tests/Makefile
+src/tests/build/**
+src/tests/CMakeFiles/**

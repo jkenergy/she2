@@ -1,6 +1,8 @@
 # This software is licensed according to the APACHE LICENSE 2.0:
 #
 # https://www.apache.org/licenses/LICENSE-2.0.txt
+#
+# Additional support for KDF and GCM Copyright (C) 2024 JK Energy Ltd.
 
 cmake_minimum_required(VERSION 2.8)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -46,12 +48,14 @@ else()
 endif(SM_CODE_IN_RAM)
 unset(SM_CODE_IN_RAM CACHE)
 
-add_library(swshe cmac.c cmacdyn.c dececb.c encecb.c exportramkey.c extseed.c getid.c init.c kdf.c loadkey.c platform.c reset.c rng.c)
+add_library(swshe ckdf.c gcm.c cmac.c cmacdyn.c dececb.c encecb.c exportramkey.c extseed.c getid.c init.c kdf.c loadkey.c platform.c reset.c rng.c)
 
 include_directories(..)
 set(CMAKE_CXX_STANDARD 99)
 set (CMAKE_C_FLAGS "-std=c99 ${CMAKE_C_FLAGS}")
 set(SOURCE_FILES
+        ckdf.c
+        gcm.c
         cmac.c
         cmacdyn.c
         dececb.c

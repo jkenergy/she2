@@ -19,7 +19,7 @@
 typedef struct {
     sm_block_t key;                                 // We store just the 128-bit AES keys in NVRAM
     uint32_t counter;                               // 28 bits, saturating add
-    uint8_t flags;                                  // 5:0 contains SHE flags, bit 7 == empty slot flag
+    uint16_t flags;                                 // 5:0 contains SHE flags, bits 6:8 store empty slot, plain key and AEAD state
 } sm_sw_nvram_key_slot_t;
 
 typedef struct {
@@ -51,6 +51,6 @@ she_errorcode_t sm_sw_nvram_factory_reset(const sm_block_t *secret_key);
 
 // Backdoor call to set an encryption key
 // This API is deprecated and will be replaced by the SHE mechanism for loading a key
-she_errorcode_t sm_sw_nvram_backdoor_set_key(sm_key_id_t key_number, const sm_block_t *key, bool authentication_key);
+she_errorcode_t sm_sw_nvram_backdoor_set_key(sm_key_id_t key_number, const sm_block_t *key, uint16_t flags);
 
 #endif // NVRAM_H

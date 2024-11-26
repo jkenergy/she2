@@ -6,6 +6,8 @@
 //
 // https://www.apache.org/licenses/LICENSE-2.0.txt
 //
+// Additional flags Copyright (C) 2024 JK Energy Ltd.
+//
 // Created by ken on 02/11/16.
 
 #include "swshe.h"
@@ -71,7 +73,7 @@ she_errorcode_t FAST_CODE sm_platform_check(void)
     sm_block_t expected_ciphertext = {.bytes = {0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30, 
                                                 0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4, 0xc5, 0x5a}};
 
-    sm_sw_nvram_backdoor_set_key(SHE_KEY_2, &key, false);
+    sm_sw_nvram_backdoor_set_key(SHE_KEY_2, &key, 0);
 
     sm_block_t ciphertext;
     sm_init_rng();
