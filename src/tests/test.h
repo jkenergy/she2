@@ -63,6 +63,15 @@ void printf_she_errorcode_t(she_errorcode_t code)
         case SHE_ERC_RNG_SEED:
             printf("SHE_ERC_RNG_SEED\n");
             break;
+        case SHE_ERC_CTX_INVALID:
+            printf("SHE_ERC_CTX_INVALID\n");
+            break;
+        case SHE_ERC_CTX_EMPTY:
+            printf("SHE_ERC_CTX_EMPTY\n");
+            break;
+        case SHE_ERC_SIZE:
+            printf("SHE_ERC_SIZE\n");
+            break;
         default:
             printf("UNKNOWN ERROR CODE\n");
             break;

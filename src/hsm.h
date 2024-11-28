@@ -76,7 +76,10 @@ typedef enum {
     SHE_ERC_GENERAL_ERROR,
     SHE_ERC_KEY_WRITE_PROTECTED,
     SHE_ERC_KEY_UPDATE_ERROR,
-    SHE_ERC_RNG_SEED
+    SHE_ERC_RNG_SEED,
+    SHE_ERC_CTX_INVALID,
+    SHE_ERC_CTX_EMPTY,
+    SHE_ERC_SIZE
 } she_errorcode_t;
 
 typedef union {
@@ -84,7 +87,10 @@ typedef union {
     uint32_t words[4];
 } sm_block_t;
 
-typedef uint8_t sm_key_id_t;    // 0-15
+#define NUM_GCM_CONTEXTS        (4U)
+
+typedef uint8_t sm_key_id_t;        // 0 .. 15
+typedef uint8_t sm_aead_ctx_id_t;   // 0 .. NUM_GCM_CONTEXTS-1
 
 // Checks that the platform is compiled correctly on the target device
 she_errorcode_t sm_platform_check(void);
@@ -139,7 +145,7 @@ she_errorcode_t sm_enc_aead(sm_key_id_t key_id,
                             sm_block_t *iv,
                             const uint8_t *aad,
                             size_t aad_length,
-                            const uint8_t *plaintext,
+                            uint8_t *plaintext,
                             uint8_t *ciphertext,
                             size_t length,
                             sm_block_t *tag,
@@ -149,11 +155,11 @@ she_errorcode_t sm_dec_aead(sm_key_id_t key_id,
                             sm_block_t *iv,
                             const uint8_t *aad,
                             size_t aad_length,
-                            const uint8_t *ciphertext,
+                            uint8_t *ciphertext,
                             uint8_t *plaintext,
                             size_t length,
                             sm_block_t *tag,
-                            size_t tag_length,
+                            uint8_t tag_length,
                             bool *verified,
                             bool ao);
 

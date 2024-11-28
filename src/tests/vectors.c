@@ -80,6 +80,15 @@ void printf_she_errorcode_t(she_errorcode_t code)
         case SHE_ERC_RNG_SEED:
             printf("SHE_ERC_RNG_SEED\n");
             break;
+        case SHE_ERC_CTX_INVALID:
+            printf("SHE_ERC_CTX_INVALID\n");
+            break;
+        case SHE_ERC_CTX_EMPTY:
+            printf("SHE_ERC_CTX_EMPTY\n");
+            break;
+        case SHE_ERC_SIZE:
+            printf("SHE_ERC_SIZE\n");
+            break;
         default:
             printf("UNKNOWN ERROR CODE\n");
             break;
@@ -501,7 +510,7 @@ void test5(void)
     bool verified2;
     rc = sm_dec_aead(SHE_KEY_3, &iv2, aad2, sizeof(aad2), ciphertext2, expected_output2, sizeof(plaintext2), &tag2, 128U, &verified2, false);
     if (rc != SHE_ERC_NO_ERROR || !bytes_equals(expected_output2, plaintext2, sizeof(plaintext2)) || !verified2) {
-        #ifdef EMBEDDED
+#ifdef EMBEDDED
         for(;;)
             sm_breakpoint++;
 #else

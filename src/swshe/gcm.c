@@ -1,6 +1,11 @@
 // Addition of GCM support Copyright (C) 2024 JK Energy Ltd.
 //
 // GCM implementation to enhance SHE HSM emulator.
+//
+// TODO create an unset API call to stop using the context
+// TODO check in sm_set_aead_ctx that the context is unset (i.e. not in use)
+// TODO check that AAD is 16 bytes except for the last AAD (i.e. when < 16 bytes, set an aad_done flag)
+// FIXME change enc/dec AEAD API to use a GCM context
 
 #include "swshe.h"
 
@@ -24,8 +29,12 @@ typedef struct {
     sm_block_t buf;
     uint32_t len;
     uint32_t aad_len;
+    bool set;
 } gcm_context_t;
 
+// This will store the GCM contexts, binding to an AES-GCM key. Once a context
+// is initialized, the source key is no longer needed, so a RAM key slot can be used.
+static gcm_context_t gcm_context_table[NUM_GCM_CONTEXTS];
 
 // Precompute the table for multiplying by H. This has to be run each time there
 // might be a new AES-GCM key. It consists of one AES operation plus creating the
@@ -68,6 +77,7 @@ static void gcm_setkey(gcm_context_t *ctx, const sm_aes_enc_roundkey_t *key)
             hl[j] = vl ^ ctx->htable_l[j];
         }
     }
+    ctx->set = true;
 }
 
 // Carryless multiply is used in GHASH to perform AEAD and AO encryption
@@ -109,6 +119,7 @@ static void FAST_CODE gcm_mult(gcm_context_t *ctx)
     GCM_END();
 }
 
+#ifdef NOTDEF // Remove when refactored to new incremental API
 static void FAST_CODE gcm_start(gcm_context_t *ctx,
                                 const sm_block_t *iv,         // pointer to initialization vector (IV is in words[0-2])
                                 const uint8_t *aad,           // Additional Authenticated Data
@@ -130,12 +141,6 @@ static void FAST_CODE gcm_start(gcm_context_t *ctx,
     // Encrypt the IV (used at the end)
     sm_aes_encrypt(ctx->aes_key, &ctx->y, &ctx->enc_iv);
 
-    // FIXME remove
-    // printf("AAD:\n");
-    // printf_bytes(aad, aad_len);
-    // printf("AO plaintext:\n");
-    // printf_bytes(ao_plaintext, ao_plaintext_len);
-    
     // Feed in the AAD to GHASH
     while(aad_total_len > 0) {
         size_t len = (aad_total_len < 16U) ? aad_total_len : 16U;  // Capped at a block size
@@ -150,16 +155,14 @@ static void FAST_CODE gcm_start(gcm_context_t *ctx,
             p++;
             seg_len--;
         }
-        // FIXME remove
-        // printf("ctx buf:\n");
-        // printf_block(&ctx->buf);
         gcm_mult(ctx);
         aad_total_len -= len;
     }
 }
+#endif
 
-void FAST_CODE ALT_gcm_start(gcm_context_t *ctx,
-                                    const sm_block_t *iv)
+void FAST_CODE gcm_start(gcm_context_t *ctx,
+                         const sm_block_t *iv)
 {
     ctx->len = 0;
     ctx->aad_len = 0;
@@ -174,18 +177,15 @@ void FAST_CODE ALT_gcm_start(gcm_context_t *ctx,
 // Called repeatedly with data, up to 16 bytes in length. Must only
 // call with less than 16 bytes if this is the last part of the AAD,
 // and THE BLOCK MUST BE 0 PADDED.
-void FAST_CODE ALT_gcm_add_aad(gcm_context_t *ctx,
-                                  sm_block_t *aad,              // Additional Authenticated Data
-                                  size_t aad_len)               // Must be <= 16, and if < 16 then this is the final part of AAD
+void FAST_CODE gcm_add_aad(gcm_context_t *ctx,
+                           sm_block_t *aad,              // Additional Authenticated Data
+                           uint8_t aad_len)               // Must be <= 16, and if < 16 then this is the final part of AAD
 {
     // Feed in the AAD to GHASH
     ctx->buf.words[0] ^= aad->words[0];
     ctx->buf.words[1] ^= aad->words[1];
     ctx->buf.words[2] ^= aad->words[2];
     ctx->buf.words[3] ^= aad->words[3]; 
-    // FIXME remove 
-    // printf("ctx buf:\n");  
-    // printf_block(&ctx->buf);
     gcm_mult(ctx);
     ctx->aad_len += aad_len;
 }
@@ -193,14 +193,13 @@ void FAST_CODE ALT_gcm_add_aad(gcm_context_t *ctx,
 // Called repeatedly with data, up to 16 bytes in length. Must only
 // call with less than 16 bytes if this is the last part of the data.
 // No padding is necessary.
-void FAST_CODE ALT_gcm_add_data(gcm_context_t *ctx,
-                                 size_t length,          // length, in bytes, of data to process
-                                 const uint8_t *input,   // pointer to source data
-                                 uint8_t *output,        // pointer to destination data
-                                 bool encrypt)        
+void FAST_CODE gcm_add_data(gcm_context_t *ctx,
+                            uint8_t length,          // length, in bytes, of data to process
+                            const uint8_t *input,   // pointer to source data
+                            uint8_t *output,        // pointer to destination data
+                            bool encrypt)        
 {
     sm_block_t ectr;    // counter-mode cipher output for XORing
-
     ctx->len += length; // bump the GCM context's running length count
 
     // Increment the counter part of the IV block
@@ -243,6 +242,7 @@ void FAST_CODE ALT_gcm_add_data(gcm_context_t *ctx,
     gcm_mult(ctx);    // perform a carryless multiply operation
 }
 
+#ifdef NOTDEF // Remove when refactored to new incremental API
 static void FAST_CODE gcm_update(gcm_context_t *ctx,
                                  size_t length,          // length, in bytes, of data to process
                                  const uint8_t *input,   // pointer to source data
@@ -301,6 +301,7 @@ static void FAST_CODE gcm_update(gcm_context_t *ctx,
         output += use_len;  // bump our output pointer forward
     }
 }
+#endif
 
 static void FAST_CODE gcm_finish(gcm_context_t *ctx, sm_block_t *tag)
 {
@@ -332,17 +333,11 @@ static void FAST_CODE gcm_finish(gcm_context_t *ctx, sm_block_t *tag)
 
 //////////////////// AES-GCM API calls ////////////////////
 
-she_errorcode_t sm_enc_aead(sm_key_id_t key_id,
-                           sm_block_t *iv,
-                           const uint8_t *aad,
-                           size_t aad_length,
-                           const uint8_t *plaintext,
-                           uint8_t *ciphertext,
-                           size_t length,
-                           sm_block_t *tag,
-                           bool ao)
+////////////////// Incremental AEAD API ///////////////////
+
+// Set a GCM context from a key (typically the RAM key)
+she_errorcode_t sm_set_aead_ctx(sm_key_id_t key_id, sm_aead_ctx_id_t ctx_id)
 {
-    gcm_context_t ctx;
     ////// Cannot use API unless the SHE has been initialized //////
     if (!sm_prng_init) {
         return SHE_ERC_GENERAL_ERROR;
@@ -364,7 +359,256 @@ she_errorcode_t sm_enc_aead(sm_key_id_t key_id,
     if (!(flags & SHE_FLAG_AEAD) && (key_id != SHE_RAM_KEY)) {
         return SHE_ERC_KEY_INVALID;
     }
+    if (ctx_id >= NUM_GCM_CONTEXTS) {
+        return SHE_ERC_CTX_INVALID;
+    }
+
 #ifdef SM_KEY_EXPANSION_CACHED
+    const sm_aes_enc_roundkey_t *roundkey = &sm_cached_key_slots[key_id].enc_roundkey;
+#else
+    sm_aes_enc_roundkey_t expanded_roundkey;
+    sm_aes_enc_roundkey_t *roundkey = &expanded_roundkey;
+    sm_expand_key_enc(&sm_sw_nvram_fs_ptr->key_slots[key_id].key, roundkey);
+#endif
+    gcm_context_t *ctx = &gcm_context_table[ctx_id];
+
+    // Have the roundkey now for AES, set the key into the GCM context
+    gcm_setkey(ctx, roundkey);
+
+    return SHE_ERC_NO_ERROR;
+}
+
+// Starts an AEAD context for encrypt or decrypt
+she_errorcode_t sm_start_aead(sm_aead_ctx_id_t ctx_id, sm_block_t *iv)
+{
+    ////// Cannot use API unless the SHE has been initialized //////
+    if (!sm_prng_init) {
+        return SHE_ERC_GENERAL_ERROR;
+    }
+    if (ctx_id >= SM_SW_NUM_AEAD_CTX) {
+        return SHE_ERC_CTX_INVALID;
+    }
+    gcm_context_t *ctx = &gcm_context_table[ctx_id];
+    if (!ctx->set) {
+        return SHE_ERC_CTX_EMPTY;
+    }
+    gcm_start(ctx, iv);
+
+    return SHE_ERC_NO_ERROR;
+}
+
+// Adds some AAD. Length must be 16 bytes except for the last AAD.
+// This API call is used for encrypt or decrypt.
+she_errorcode_t sm_aad_aead(sm_aead_ctx_id_t ctx_id,
+                            const uint8_t *aad,
+                            size_t aad_length)
+{
+    if (!sm_prng_init) {
+        return SHE_ERC_GENERAL_ERROR;
+    }
+    if (ctx_id >= SM_SW_NUM_AEAD_CTX) {
+        return SHE_ERC_CTX_INVALID;
+    }
+    gcm_context_t *ctx = &gcm_context_table[ctx_id];
+    if (!ctx->set) {
+        return SHE_ERC_CTX_EMPTY;
+    }
+    if (aad_length > 16) {
+        return SHE_ERC_SIZE;
+    }
+    sm_block_t tmp;
+    BLOCK_ZERO(&tmp);
+    // We don't know alignment of the source data, so copy byte-by-byte
+    for(size_t i = 0; i < aad_length; i++) {
+        tmp.bytes[i] ^= aad[i];
+    }
+    gcm_add_aad(ctx, &tmp, aad_length); // The total AAD length will be accumulated in the context
+
+    return SHE_ERC_NO_ERROR;
+}
+
+// Adds some data. Length must be 16 bytes except for the last data.
+// This API call is used for encrypt or decrypt.
+she_errorcode_t sm_data_aead(sm_aead_ctx_id_t ctx_id,
+                             uint8_t *plaintext,
+                             uint8_t *ciphertext,
+                             size_t data_length,
+                             bool encrypt)
+{
+    if (!sm_prng_init) {
+        return SHE_ERC_GENERAL_ERROR;
+    }
+    if (ctx_id >= SM_SW_NUM_AEAD_CTX) {
+        return SHE_ERC_CTX_INVALID;
+    }
+    gcm_context_t *ctx = &gcm_context_table[ctx_id];
+    if (!ctx->set) {
+        return SHE_ERC_CTX_EMPTY;
+    }
+    if (data_length > 16) {
+        return SHE_ERC_SIZE;
+    }
+    if (encrypt) {
+        gcm_add_data(ctx, data_length, plaintext, ciphertext, true);
+    }
+    else {
+        gcm_add_data(ctx, data_length, ciphertext, plaintext, false);
+    }
+
+    return SHE_ERC_NO_ERROR;
+}
+
+// Finish up and verify the tag
+she_errorcode_t sm_verify_aead_tag(sm_aead_ctx_id_t ctx_id,
+                                   const uint8_t *tag,
+                                   uint8_t tag_length,
+                                   bool *verified)
+{
+    if (!sm_prng_init) {
+        return SHE_ERC_GENERAL_ERROR;
+    }
+    if (ctx_id >= SM_SW_NUM_AEAD_CTX) {
+        return SHE_ERC_CTX_INVALID;
+    }
+    gcm_context_t *ctx = &gcm_context_table[ctx_id];
+    if (!ctx->set) {
+        return SHE_ERC_CTX_EMPTY;
+    }
+    if (tag_length > 128U) {
+        return SHE_ERC_SIZE;
+    }
+    uint8_t tag_bytes = (tag_length + 7U) >> 3;
+    sm_block_t tmp_tag;
+    for (uint8_t i = 0; i < tag_bytes; i++) {
+        tmp_tag.bytes[i] = tag[i];
+    }
+    sm_block_t calculated_tag;
+    uint32_t tag_mask[4];
+    asrm_128(tag_mask, tag_length); // Produce a mask equal to the tag size in bits
+
+    gcm_finish (ctx, &calculated_tag);
+    uint32_t cmp = sm_compare_mac(&tmp_tag, &calculated_tag, tag_mask);
+
+    *verified = cmp == 0;
+
+    return SHE_ERC_NO_ERROR;
+}
+
+she_errorcode_t sm_generate_aead_tag(sm_aead_ctx_id_t ctx_id,
+                                     uint8_t *tag,
+                                     uint8_t tag_length)
+{
+    if (!sm_prng_init) {
+        return SHE_ERC_GENERAL_ERROR;
+    }
+    if (ctx_id >= SM_SW_NUM_AEAD_CTX) {
+        return SHE_ERC_CTX_INVALID;
+    }
+    gcm_context_t *ctx = &gcm_context_table[ctx_id];
+    if (!ctx->set) {
+        return SHE_ERC_CTX_EMPTY;
+    }
+    if (tag_length > 16U) {
+        return SHE_ERC_SIZE;
+    }
+
+    sm_block_t tmp_tag;
+    // Finish up and generate the tag of a certain size
+    gcm_finish(ctx, &tmp_tag);
+    for (uint8_t i = 0; i < tag_length; i++) {
+        tag[i] = tmp_tag.bytes[i];
+    }
+
+    return SHE_ERC_NO_ERROR;
+}
+
+///////////// Classic AEAD API /////////////
+she_errorcode_t sm_enc_aead(sm_key_id_t key_id,
+                            sm_block_t *iv,
+                            const uint8_t *aad,
+                            size_t aad_length,
+                            uint8_t *plaintext,
+                            uint8_t *ciphertext,
+                            size_t length,
+                            sm_block_t *tag,
+                            bool ao)
+{
+    she_errorcode_t ec;
+
+    ec = sm_set_aead_ctx(key_id, 0);
+    if (ec != SHE_ERC_NO_ERROR) {
+        return ec;
+    }
+
+    ec = sm_start_aead(0, iv);
+    if (ec != SHE_ERC_NO_ERROR) {
+        return ec;
+    }
+
+    // Now fill in multiple 16 byte blocks of AAD and AO plaintext, except for the last one
+    size_t ao_length = ao ? length : 0;
+    const uint8_t *p = aad;
+    size_t aad_total_len = aad_length + ao_length;
+    size_t seg_len = aad_length;
+
+    // Feed in the AAD and payload byte-by-byte (because alignment is not known)
+    while(aad_total_len > 0) {
+        size_t len = (aad_total_len < 16U) ? aad_total_len : 16U;  // Capped at a block size
+        uint8_t tmp[16];
+        for(size_t i = 0; i < len; i++) {
+            if (seg_len == 0) {
+                seg_len = ao_length; // Payload length
+                p = plaintext;
+            }
+            // Have to do this byte-by-byte because we do not know if AAD is aligned
+            // or a whole number of words
+            tmp[i] = *p;
+            p++;
+            seg_len--;
+        }
+        ec = sm_aad_aead(0, tmp, len);
+        if (ec != SHE_ERC_NO_ERROR) {
+            return ec;
+        }
+        aad_total_len -= len;
+    }
+
+    // Feed in the data byte-by-byte
+    size_t data_length = ao ? 0 : length;
+    while(data_length > 0) {
+        size_t len = (data_length < 16U) ? data_length : 16U;  // Capped at a block size
+        // Input = plaintext, output = ciphertext
+        ec = sm_data_aead(0, plaintext, ciphertext, len, true);
+        if (ec != SHE_ERC_NO_ERROR) {
+            return ec;
+        }
+        data_length -= len;
+        plaintext += len;
+        ciphertext += len;
+    }
+
+    ec = sm_generate_aead_tag(0, tag->bytes, 16U);
+
+    return ec;
+}
+
+#ifdef NOTDEF
+she_errorcode_t OLD_sm_enc_aead(sm_key_id_t key_id,
+                            sm_block_t *iv,
+                            const uint8_t *aad,
+                            size_t aad_length,
+                            uint8_t *plaintext,
+                            uint8_t *ciphertext,
+                            size_t length,
+                            sm_block_t *tag,
+                            bool ao)
+{
+    ////// Cannot use API unless the SHE has been initialized //////
+    if (!sm_prng_init) {
+        return SHE_ERC_GENERAL_ERROR;
+    }
+    gcm_context_t *ctx = &gcm_context_table[0];
+    #ifdef SM_KEY_EXPANSION_CACHED
     const sm_aes_enc_roundkey_t *roundkey = &sm_cached_key_slots[key_id].enc_roundkey;
 #else
     sm_aes_enc_roundkey_t expanded_roundkey;
@@ -373,22 +617,17 @@ she_errorcode_t sm_enc_aead(sm_key_id_t key_id,
 #endif
 
     // Have the roundkey now for AES 
-    gcm_setkey(&ctx, roundkey);
-    ALT_gcm_start(&ctx, iv);
-        
+    gcm_setkey(ctx, roundkey);
+
+    // Now start a specific AEAD operation
+    gcm_start(ctx, iv);
+
     // Now fill in multiple 16 byte blocks of AAD and AO plaintext, except for the last one
     size_t ao_length = ao ? length : 0;
     const uint8_t *p = aad;
     sm_block_t tmp;
     size_t aad_total_len = aad_length + ao_length;
     size_t seg_len = aad_length;
-
-    // FIXME remove
-    // printf("AAD:\n");
-    // printf_bytes(aad, aad_length);
-    // printf("Payload:\n");
-    // printf_bytes(plaintext, ao_length);
-    // printf("\n");
 
     // Feed in the AAD and payload byte-by-byte (because alignment is not known)
     while(aad_total_len > 0) {
@@ -405,10 +644,7 @@ she_errorcode_t sm_enc_aead(sm_key_id_t key_id,
             p++;
             seg_len--;
         }
-        // FIXME remove
-        // printf("tmp:\n");
-        // printf_block(&tmp);
-        ALT_gcm_add_aad(&ctx, &tmp, len);
+        gcm_add_aad(ctx, &tmp, len);
         aad_total_len -= len;
     }
 
@@ -417,27 +653,99 @@ she_errorcode_t sm_enc_aead(sm_key_id_t key_id,
     while(data_length > 0) {
         size_t len = (data_length < 16U) ? data_length : 16U;  // Capped at a block size
         // Input = plaintext, output = ciphertext
-        ALT_gcm_add_data(&ctx, len, plaintext, ciphertext, true);
+        gcm_add_data(ctx, len, plaintext, ciphertext, true);
         data_length -= len;
         plaintext += len;
         ciphertext += len;
     }
 
     // Finish up and generate the tag
-    gcm_finish(&ctx, tag);
+    gcm_finish(ctx, tag);
 
     return SHE_ERC_NO_ERROR;
 }
+#endif
 
 she_errorcode_t sm_dec_aead(sm_key_id_t key_id,
                             sm_block_t *iv,
                             const uint8_t *aad,
                             size_t aad_length,
-                            const uint8_t *ciphertext,
+                            uint8_t *ciphertext,
                             uint8_t *plaintext,
                             size_t length,
                             sm_block_t *tag,
-                            size_t tag_length,
+                            uint8_t tag_length,
+                            bool *verified,
+                            bool ao)
+{
+    she_errorcode_t ec;
+
+    ec = sm_set_aead_ctx(key_id, 0);
+    if (ec != SHE_ERC_NO_ERROR) {
+        return ec;
+    }
+
+    ec = sm_start_aead(0, iv);
+    if (ec != SHE_ERC_NO_ERROR) {
+        return ec;
+    }
+
+    // Now fill in multiple 16 byte blocks of AAD and AO plaintext, except for the last one
+    size_t ao_length = ao ? length : 0;
+    const uint8_t *p = aad;
+    size_t aad_total_len = aad_length + ao_length;
+    size_t seg_len = aad_length;
+
+    // Feed in the AAD and payload byte-by-byte (because alignment is not known)
+    while(aad_total_len > 0) {
+        size_t len = (aad_total_len < 16U) ? aad_total_len : 16U;  // Capped at a block size
+        uint8_t tmp[16];
+        for(size_t i = 0; i < len; i++) {
+            if (seg_len == 0) {
+                seg_len = ao_length; // Payload length
+                p = ciphertext;
+            }
+            // Have to do this byte-by-byte because we do not know if AAD is aligned
+            // or a whole number of words
+            tmp[i] = *p;
+            p++;
+            seg_len--;
+        }
+        ec = sm_aad_aead(0, tmp, len);
+        if (ec != SHE_ERC_NO_ERROR) {
+            return ec;
+        }
+        aad_total_len -= len;
+    }
+
+    // Feed in the data byte-by-byte
+    size_t data_length = ao ? 0 : length;
+    while(data_length > 0) {
+        size_t len = (data_length < 16U) ? data_length : 16U;  // Capped at a block size
+        ec = sm_data_aead(0, plaintext, ciphertext, len, false);
+        if (ec != SHE_ERC_NO_ERROR) {
+            return ec;
+        }
+        data_length -= len;
+        plaintext += len;
+        ciphertext += len;
+    }
+
+    ec = sm_verify_aead_tag(0, tag->bytes, tag_length, verified);
+
+    return ec;
+}
+
+#ifdef NOTDEF
+she_errorcode_t sm_dec_aead(sm_key_id_t key_id,
+                            sm_block_t *iv,
+                            const uint8_t *aad,
+                            size_t aad_length,
+                            uint8_t *ciphertext,
+                            uint8_t *plaintext,
+                            size_t length,
+                            sm_block_t *tag,
+                            uint8_t tag_length,
                             bool *verified,
                             bool ao)
 {
@@ -477,7 +785,7 @@ she_errorcode_t sm_dec_aead(sm_key_id_t key_id,
     gcm_context_t ctx;
 
     gcm_setkey(&ctx, roundkey);
-    ALT_gcm_start(&ctx, iv);
+    gcm_start(&ctx, iv);
 
     // Now fill in multiple 16 byte blocks of AAD and AO ciphertext (i.e. plaintext), except for the last one
     size_t ao_length = ao ? length : 0;
@@ -501,7 +809,7 @@ she_errorcode_t sm_dec_aead(sm_key_id_t key_id,
             p++;
             seg_len--;
         }
-        ALT_gcm_add_aad(&ctx, &tmp, len);
+        gcm_add_aad(&ctx, &tmp, len);
         aad_total_len -= len;
     }
 
@@ -510,7 +818,7 @@ she_errorcode_t sm_dec_aead(sm_key_id_t key_id,
     while(data_length > 0) {
         size_t len = (data_length < 16U) ? data_length : 16U;  // Capped at a block size
         // Input = ciphertext, output = plaintext
-        ALT_gcm_add_data(&ctx, len, ciphertext, plaintext, false);
+        gcm_add_data(&ctx, len, ciphertext, plaintext, false);
         data_length -= len;
         plaintext += len;
         ciphertext += len;
@@ -524,7 +832,9 @@ she_errorcode_t sm_dec_aead(sm_key_id_t key_id,
 
     return SHE_ERC_NO_ERROR;
 }
+#endif // Remove when refactored to new incremental API
 
+#ifdef NOTDEF // Remove when refactored to new incremental API
 she_errorcode_t OLD_sm_enc_aead(sm_key_id_t key_id,
                            sm_block_t *iv,
                            const uint8_t *aad,
@@ -579,7 +889,9 @@ she_errorcode_t OLD_sm_enc_aead(sm_key_id_t key_id,
 
     return SHE_ERC_NO_ERROR;
 }
+#endif 
 
+#ifdef NOTDEF // Remove when refactored to new incremental API
 she_errorcode_t OLD_sm_dec_aead(sm_key_id_t key_id,
                             sm_block_t *iv,
                             const uint8_t *aad,
@@ -644,3 +956,4 @@ she_errorcode_t OLD_sm_dec_aead(sm_key_id_t key_id,
 
     return SHE_ERC_NO_ERROR;
 }                           
+#endif

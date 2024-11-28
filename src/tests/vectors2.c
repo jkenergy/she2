@@ -33,7 +33,7 @@ static void set_master_ecu_key(const sm_block_t *key)
     sm_sw_nvram_fs_ptr->key_slots[1].key.words[2] = key->words[2];
     sm_sw_nvram_fs_ptr->key_slots[1].key.words[3] = key->words[3];
     sm_sw_nvram_fs_ptr->key_slots[1].counter = 0;
-    // FIXME what are the permissions for the ECU master key?
+    // TODO what are the permissions for the ECU master key?
     // sm_sw_nvram_fs_ptr->key_slots[1].flags = authentication_key ? SHE_FLAG_KEY_USAGE : 0;
 
     // Set up the key in the table (including cache of roundkey expansion if necessaary)
