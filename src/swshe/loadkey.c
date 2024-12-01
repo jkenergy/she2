@@ -297,6 +297,34 @@ she_errorcode_t FAST_CODE sm_load_key(const sm_block_t *m1, const sm_block_t *m2
     return SHE_ERC_NO_ERROR;
 }
 
+she_errorcode_t FAST_CODE sm_load_plain_aead_key(const sm_block_t *plain_aead_key)
+{
+    // Loads a plain key into the RAM slot as an AEAD key
+    ////// Cannot use API unless the SHE has been initialized //////
+    if (!sm_prng_init) {
+        return SHE_ERC_GENERAL_ERROR;
+    }
+
+    sm_aes_enc_roundkey_t *roundkey;
+
+    sm_sw_nvram_fs_ptr->key_slots[SHE_RAM_KEY].key.words[0] = plain_aead_key->words[0];
+    sm_sw_nvram_fs_ptr->key_slots[SHE_RAM_KEY].key.words[1] = plain_aead_key->words[1];
+    sm_sw_nvram_fs_ptr->key_slots[SHE_RAM_KEY].key.words[2] = plain_aead_key->words[2];
+    sm_sw_nvram_fs_ptr->key_slots[SHE_RAM_KEY].key.words[3] = plain_aead_key->words[3];
+    sm_sw_nvram_fs_ptr->key_slots[SHE_RAM_KEY].flags = SWSM_FLAG_PLAIN_KEY | SHE_FLAG_AEAD;
+#ifdef SM_KEY_EXPANSION_CACHED
+    roundkey = &sm_cached_key_slots[SHE_RAM_KEY].enc_roundkey;
+#else
+    sm_aes_enc_roundkey_t enc_roundkey;
+    roundkey = &enc_roundkey;
+#endif
+    // Expand into the cache (if a cache is present) or just a temporary place
+    sm_expand_key_enc(&sm_sw_nvram_fs_ptr->key_slots[SHE_RAM_KEY].key, roundkey);
+
+    // Do not set the K1 tweak because this key cannot be used for CMAC: it is an AEAD key
+    return SHE_ERC_NO_ERROR;
+}
+
 she_errorcode_t FAST_CODE sm_load_plain_key(const sm_block_t *plain_key)
 {
     ////// Cannot use API unless the SHE has been initialized //////
