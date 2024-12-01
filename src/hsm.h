@@ -79,7 +79,7 @@ typedef enum {
     SHE_ERC_RNG_SEED,
     SHE_ERC_CTX_INVALID,
     SHE_ERC_CTX_EMPTY,
-    SHE_ERC_SIZE
+    SHE_ERC_SIZE,
 } she_errorcode_t;
 
 typedef union {
@@ -87,10 +87,12 @@ typedef union {
     uint32_t words[4];
 } sm_block_t;
 
-#define NUM_GCM_CONTEXTS        (4U)
+#define SHE_NUM_AEAD_CONTEXTS       (16U)
+#define SHE_NUM_VOLATILE_AEAD_KEYS  (8U)
 
-typedef uint8_t sm_key_id_t;        // 0 .. 15
-typedef uint8_t sm_aead_ctx_id_t;   // 0 .. NUM_GCM_CONTEXTS-1
+typedef uint8_t sm_key_id_t;            // 0 .. 15
+typedef uint8_t sm_volatile_key_id_t;   // 0 .. SHE_NUM_VOLATILE_AEAD_KEYS-1
+typedef uint8_t sm_aead_ctx_id_t;       // 0 .. SHE_NUM_AEAD_CONTEXTS-1
 
 // Checks that the platform is compiled correctly on the target device
 she_errorcode_t sm_platform_check(void);
@@ -169,5 +171,16 @@ she_errorcode_t sm_aead_kdf(sm_key_id_t key_id,
 
 she_errorcode_t sm_update_counter(sm_key_id_t counter_id,
                                   uint32_t value);
+
+// Loads a plain AEAD key (used to side-load an SAK if a KDF isn't used)
+she_errorcode_t sm_load_plain_aead_key(const sm_block_t *plain_aead_key);
+
+// AEAD incremental API 
+she_errorcode_t sm_set_aead_key(sm_key_id_t key_id, sm_volatile_key_id_t aead_key_id);
+she_errorcode_t sm_init_aead_ctx(sm_volatile_key_id_t aead_key_id, sm_aead_ctx_id_t ctx_id, sm_block_t *iv);
+she_errorcode_t sm_aad_aead(sm_aead_ctx_id_t ctx_id, const uint8_t *aad, size_t aad_length);
+she_errorcode_t sm_data_aead(sm_aead_ctx_id_t ctx_id, uint8_t *plaintext, uint8_t *ciphertext, size_t data_length, bool encrypt);
+she_errorcode_t sm_verify_aead_tag(sm_aead_ctx_id_t ctx_id, const uint8_t *tag, uint8_t tag_length, bool *verified);
+she_errorcode_t sm_generate_aead_tag(sm_aead_ctx_id_t ctx_id, uint8_t *tag);
 
 #endif //SM_HSM_H

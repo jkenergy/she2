@@ -14,7 +14,7 @@
 #include "she.h"
 
 #define SM_SW_NUM_KEYS                              (16U)
-#define SM_SW_NUM_AEAD_CTX                          (4U)
+#define SM_SW_NUM_AEAD_CTX                          (SHE_NUM_AEAD_CONTEXTS)
 
 // This is what goes into NVRAM
 typedef struct {

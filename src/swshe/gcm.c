@@ -2,17 +2,14 @@
 //
 // GCM implementation to enhance SHE HSM emulator.
 //
-// TODO create an unset API call to stop using the context
-// TODO check in sm_set_aead_ctx that the context is unset (i.e. not in use)
 // TODO check that AAD is 16 bytes except for the last AAD (i.e. when < 16 bytes, set an aad_done flag)
-// FIXME change enc/dec AEAD API to use a GCM context
 
 #include "swshe.h"
 
 // FIXME remove
-// #include <stdio.h>
-// void printf_block(sm_block_t *block);
-// void printf_bytes(const uint8_t *b, size_t l);
+#include <stdio.h>
+void printf_block(sm_block_t *block);
+void printf_bytes(const uint8_t *b, size_t l);
 
 // Don't mark these as const because they should go into RAM to avoid flash memory delays
 static uint32_t last4[16] = {
@@ -20,30 +17,38 @@ static uint32_t last4[16] = {
     0xe1000000U, 0xfd200000U, 0xd9400000U, 0xc5600000U, 0x91800000U, 0x8da00000U, 0xa9c00000U, 0xb5e00000U,
 };
 
+// Expanded AES-GCM key
 typedef struct {
     uint64_t htable_l[16];  // Precomputed GHASH tables
     uint64_t htable_h[16];
-    sm_block_t y;
     const sm_aes_enc_roundkey_t *aes_key;
-    sm_block_t enc_iv;
-    sm_block_t buf;
-    uint32_t len;
-    uint32_t aad_len;
     bool set;
+} gcm_key_t;
+
+// GCM context that's used for an ongoing encrypt/decrypt operation
+typedef struct {
+    gcm_key_t *gcm_key;
+    sm_block_t y;           // IV with running counter (top 96 bits don't change)
+    sm_block_t buf;         // Running buffer through the encryption state
+    uint32_t aad_len;       // Accumulated length of the AAD
+    uint32_t len;           // Accumulated length of the data
+    bool in_use;
 } gcm_context_t;
 
 // This will store the GCM contexts, binding to an AES-GCM key. Once a context
 // is initialized, the source key is no longer needed, so a RAM key slot can be used.
-static gcm_context_t gcm_context_table[NUM_GCM_CONTEXTS];
+// These tables are in bss and will be zeroed on start, so the set flags will be clear.
+static gcm_context_t gcm_context_table[SHE_NUM_AEAD_CONTEXTS];
+static gcm_key_t gcm_key_table[SHE_NUM_AEAD_CONTEXTS];
 
 // Precompute the table for multiplying by H. This has to be run each time there
 // might be a new AES-GCM key. It consists of one AES operation plus creating the
 // key table.
-static void gcm_setkey(gcm_context_t *ctx, const sm_aes_enc_roundkey_t *key)
+static void gcm_setkey(gcm_key_t *gcm_key, const sm_aes_enc_roundkey_t *key)
 {
     uint64_t vl, vh;
 
-    ctx->aes_key = key;
+    gcm_key->aes_key = key;
 
     // encrypt the null 128-bit block to generate a key-based value
     // which is then used to initialize our GHASH lookup tables
@@ -52,32 +57,32 @@ static void gcm_setkey(gcm_context_t *ctx, const sm_aes_enc_roundkey_t *key)
     
     // AES with the key applied to a value of 0
     sm_block_t h;
-    sm_aes_encrypt(ctx->aes_key, &zero, &h);
+    sm_aes_encrypt(gcm_key->aes_key, &zero, &h);
     vh =  ((uint64_t)(BIG_ENDIAN_WORD(h.words[0])) << 32U) | BIG_ENDIAN_WORD(h.words[1]);
     vl =  ((uint64_t)(BIG_ENDIAN_WORD(h.words[2])) << 32U) | BIG_ENDIAN_WORD(h.words[3]);
 
-    ctx->htable_l[8] = vl;
-    ctx->htable_h[8] = vh;
-    ctx->htable_l[0] = 0;
-    ctx->htable_h[0] = 0;
+    gcm_key->htable_l[8] = vl;
+    gcm_key->htable_h[8] = vh;
+    gcm_key->htable_l[0] = 0;
+    gcm_key->htable_h[0] = 0;
 
     for(uint32_t i = 4U; i > 0; i >>= 1U) {
         uint32_t t = (vl & 1U) * 0xe1000000U;
         vl  = (vh << 63U) | (vl >> 1U); // Rotate right: compiler should spot this
         vh  = (vh >> 1U) ^ ((uint64_t)t << 32U);
-        ctx->htable_l[i] = vl;
-        ctx->htable_h[i] = vh;
+        gcm_key->htable_l[i] = vl;
+        gcm_key->htable_h[i] = vh;
     }
     for (uint32_t i = 2U; i < 16U; i <<= 1U ) {
-        uint64_t *hl = ctx->htable_l + i, *hh = ctx->htable_h + i;
+        uint64_t *hl = gcm_key->htable_l + i, *hh = gcm_key->htable_h + i;
         vh = *hh;
         vl = *hl;
         for(uint32_t j = 1U; j < i; j++) {
-            hh[j] = vh ^ ctx->htable_h[j];
-            hl[j] = vl ^ ctx->htable_l[j];
+            hh[j] = vh ^ gcm_key->htable_h[j];
+            hl[j] = vl ^ gcm_key->htable_l[j];
         }
     }
-    ctx->set = true;
+    gcm_key->set = true;
 }
 
 // Carryless multiply is used in GHASH to perform AEAD and AO encryption
@@ -97,19 +102,19 @@ static void FAST_CODE gcm_mult(gcm_context_t *ctx)
             zl = (zh << 60U) | (zl >> 4U ); // Rotate right by 4 bits
             zh = (zh >> 4U);
             zh ^= ((uint64_t)last4[rem]) << 32U;
-            zh ^= ctx->htable_h[lo];
-            zl ^= ctx->htable_l[lo];
+            zh ^= ctx->gcm_key->htable_h[lo];
+            zl ^= ctx->gcm_key->htable_l[lo];
         }
         else {
-            zh = ctx->htable_h[lo];
-            zl = ctx->htable_l[lo];
+            zh = ctx->gcm_key->htable_h[lo];
+            zl = ctx->gcm_key->htable_l[lo];
         }
         rem = (uint8_t)(zl & 0x0fU);
         zl = (zh << 60U) | (zl >> 4U); // Rotate right by 4 bits
         zh = (zh >> 4U);
         zh ^= ((uint64_t)last4[rem]) << 32U;
-        zh ^= ctx->htable_h[hi];
-        zl ^= ctx->htable_l[hi];
+        zh ^= ctx->gcm_key->htable_h[hi];
+        zl ^= ctx->gcm_key->htable_l[hi];
     }
     ctx->buf.words[0] = BIG_ENDIAN_WORD(zh >> 32U);
     ctx->buf.words[1] = BIG_ENDIAN_WORD(zh);
@@ -119,17 +124,14 @@ static void FAST_CODE gcm_mult(gcm_context_t *ctx)
     GCM_END();
 }
 
-static void FAST_CODE gcm_start(gcm_context_t *ctx,
-                         const sm_block_t *iv)
+static void FAST_CODE gcm_start(gcm_context_t *ctx, const sm_block_t *iv)
 {
     ctx->len = 0;
     ctx->aad_len = 0;
     BLOCK_ZERO(&ctx->buf);
     BLOCK_COPY(iv, &ctx->y);
     // Set the counter part of the IV to 1
-    ctx->y.words[3] = BIG_ENDIAN_WORD(1);
-    // Encrypt the IV (used at the end)
-    sm_aes_encrypt(ctx->aes_key, &ctx->y, &ctx->enc_iv);
+    ctx->y.words[3] = BIG_ENDIAN_WORD(1U);
 }
 
 // Called repeatedly with data, up to 16 bytes in length. Must only
@@ -166,10 +168,7 @@ void FAST_CODE gcm_add_data(gcm_context_t *ctx,
     ctx->y.words[3] = BIG_ENDIAN_WORD(cnt);
 
     // encrypt the context's 'y' vector under the established key
-    sm_aes_encrypt(ctx->aes_key, &ctx->y, &ectr);
-
-    // if( ( ret = aes_cipher( &ctx->aes_ctx, ctx->y, ectr ) ) != 0 )
-    //     return( ret );
+    sm_aes_encrypt(ctx->gcm_key->aes_key, &ctx->y, &ectr);
 
     // We use a byte-by-byte operation here because there might not be
     // a whole block of input/output, and the input and/or output might not be
@@ -206,8 +205,14 @@ static void FAST_CODE gcm_finish(gcm_context_t *ctx, sm_block_t *tag)
     uint64_t orig_len     = (uint64_t)(ctx->len) << 3U;
     uint64_t orig_aad_len = (uint64_t)(ctx->aad_len) << 3U;
 
-    BLOCK_COPY(&ctx->enc_iv, tag);
+    sm_block_t iv;
+    // Establish the original IV with counter 1 in a block
+    BLOCK_COPY(&ctx->y, &iv);
+    iv.words[3] = BIG_ENDIAN_WORD(1U);
+    // Encrypt the original IV
+    sm_aes_encrypt(ctx->gcm_key->aes_key, &iv, tag);
 
+    // One last GCM multiply step on the encrypted IV
     if(orig_len || orig_aad_len) {
         work_block.words[0] = BIG_ENDIAN_WORD(orig_aad_len >> 32U);
         work_block.words[1] = BIG_ENDIAN_WORD(orig_aad_len);
@@ -232,8 +237,9 @@ static void FAST_CODE gcm_finish(gcm_context_t *ctx, sm_block_t *tag)
 
 ////////////////// Incremental AEAD API ///////////////////
 
-// Set a GCM context from a key (typically the RAM key)
-she_errorcode_t FAST_CODE sm_set_aead_ctx(sm_key_id_t key_id, sm_aead_ctx_id_t ctx_id)
+// Create a volatile AEAD key
+// Can re-write a volatile key slot
+she_errorcode_t FAST_CODE sm_set_aead_key(sm_key_id_t key_id, sm_volatile_key_id_t aead_key_id)
 {
     ////// Cannot use API unless the SHE has been initialized //////
     if (!sm_prng_init) {
@@ -247,7 +253,7 @@ she_errorcode_t FAST_CODE sm_set_aead_ctx(sm_key_id_t key_id, sm_aead_ctx_id_t c
         return SHE_ERC_KEY_EMPTY;
     }
     // Verify-only key cannot be used, and counter key slots cannot be used
-    if ((flags & SHE_FLAG_VERIFY_ONLY) || (flags & SHE_FLAG_COUNTER)) {  // Verify-only for an AEAD key means that encode is not permitted
+    if ((flags & SHE_FLAG_COUNTER)) {  // Verify-only for an AEAD key means that encode is not permitted
         return SHE_ERC_KEY_INVALID;
     }
     if (((key_id < SHE_KEY_1) || (key_id > SHE_KEY_10) || (flags & SHE_FLAG_KEY_USAGE)) && (key_id != SHE_RAM_KEY)) {
@@ -256,27 +262,26 @@ she_errorcode_t FAST_CODE sm_set_aead_ctx(sm_key_id_t key_id, sm_aead_ctx_id_t c
     if (!(flags & SHE_FLAG_AEAD) && (key_id != SHE_RAM_KEY)) {
         return SHE_ERC_KEY_INVALID;
     }
-    if (ctx_id >= NUM_GCM_CONTEXTS) {
-        return SHE_ERC_CTX_INVALID;
+    if (aead_key_id >= SHE_NUM_VOLATILE_AEAD_KEYS) {
+        return SHE_ERC_KEY_INVALID;
     }
-
-#ifdef SM_KEY_EXPANSION_CACHED
+    #ifdef SM_KEY_EXPANSION_CACHED
     const sm_aes_enc_roundkey_t *roundkey = &sm_cached_key_slots[key_id].enc_roundkey;
 #else
     sm_aes_enc_roundkey_t expanded_roundkey;
     sm_aes_enc_roundkey_t *roundkey = &expanded_roundkey;
     sm_expand_key_enc(&sm_sw_nvram_fs_ptr->key_slots[key_id].key, roundkey);
 #endif
-    gcm_context_t *ctx = &gcm_context_table[ctx_id];
-
-    // Have the roundkey now for AES, set the key into the GCM context
-    gcm_setkey(ctx, roundkey);
+    // Set the GCM key in the table
+    gcm_key_t *gcm_key = &gcm_key_table[aead_key_id];
+    gcm_setkey(gcm_key, roundkey);
 
     return SHE_ERC_NO_ERROR;
 }
 
-// Starts an AEAD context for encrypt or decrypt
-she_errorcode_t FAST_CODE sm_start_aead(sm_aead_ctx_id_t ctx_id, sm_block_t *iv)
+// Creates an AEAD context for encrypt or decrypt operation
+// TODO assign key permissions for verify-only for keys
+she_errorcode_t FAST_CODE sm_init_aead_ctx(sm_volatile_key_id_t aead_key_id, sm_aead_ctx_id_t ctx_id, sm_block_t *iv)
 {
     ////// Cannot use API unless the SHE has been initialized //////
     if (!sm_prng_init) {
@@ -285,10 +290,18 @@ she_errorcode_t FAST_CODE sm_start_aead(sm_aead_ctx_id_t ctx_id, sm_block_t *iv)
     if (ctx_id >= SM_SW_NUM_AEAD_CTX) {
         return SHE_ERC_CTX_INVALID;
     }
-    gcm_context_t *ctx = &gcm_context_table[ctx_id];
-    if (!ctx->set) {
-        return SHE_ERC_CTX_EMPTY;
+    if (aead_key_id >= SHE_NUM_VOLATILE_AEAD_KEYS) {
+        return SHE_ERC_KEY_INVALID;
     }
+    gcm_context_t *ctx = &gcm_context_table[ctx_id];
+    if (ctx->in_use) {
+        return SHE_ERC_KEY_NOT_AVAILABLE;
+    }
+    // Obtain key and context slot
+    gcm_key_t *gcm_key = &gcm_key_table[aead_key_id];
+    // Bind key to context
+    ctx->gcm_key = gcm_key;
+    ctx->in_use = true;
     gcm_start(ctx, iv);
 
     return SHE_ERC_NO_ERROR;
@@ -305,7 +318,7 @@ she_errorcode_t FAST_CODE sm_aad_aead(sm_aead_ctx_id_t ctx_id, const uint8_t *aa
         return SHE_ERC_CTX_INVALID;
     }
     gcm_context_t *ctx = &gcm_context_table[ctx_id];
-    if (!ctx->set) {
+    if (!ctx->in_use) {
         return SHE_ERC_CTX_EMPTY;
     }
     if (aad_length > 16) {
@@ -333,7 +346,7 @@ she_errorcode_t FAST_CODE sm_data_aead(sm_aead_ctx_id_t ctx_id, uint8_t *plainte
         return SHE_ERC_CTX_INVALID;
     }
     gcm_context_t *ctx = &gcm_context_table[ctx_id];
-    if (!ctx->set) {
+    if (!ctx->in_use) {
         return SHE_ERC_CTX_EMPTY;
     }
     if (data_length > 16) {
@@ -359,7 +372,7 @@ she_errorcode_t FAST_CODE sm_verify_aead_tag(sm_aead_ctx_id_t ctx_id, const uint
         return SHE_ERC_CTX_INVALID;
     }
     gcm_context_t *ctx = &gcm_context_table[ctx_id];
-    if (!ctx->set) {
+    if (!ctx->in_use) {
         return SHE_ERC_CTX_EMPTY;
     }
     if (tag_length > 128U) {
@@ -379,10 +392,12 @@ she_errorcode_t FAST_CODE sm_verify_aead_tag(sm_aead_ctx_id_t ctx_id, const uint
 
     *verified = cmp == 0;
 
+    ctx->in_use = false;
+    
     return SHE_ERC_NO_ERROR;
 }
 
-she_errorcode_t FAST_CODE sm_generate_aead_tag(sm_aead_ctx_id_t ctx_id, uint8_t *tag, uint8_t tag_length)
+she_errorcode_t FAST_CODE sm_generate_aead_tag(sm_aead_ctx_id_t ctx_id, uint8_t *tag)
 {
     if (!sm_prng_init) {
         return SHE_ERC_GENERAL_ERROR;
@@ -391,24 +406,22 @@ she_errorcode_t FAST_CODE sm_generate_aead_tag(sm_aead_ctx_id_t ctx_id, uint8_t 
         return SHE_ERC_CTX_INVALID;
     }
     gcm_context_t *ctx = &gcm_context_table[ctx_id];
-    if (!ctx->set) {
+    if (!ctx->in_use) {
         return SHE_ERC_CTX_EMPTY;
     }
-    if (tag_length > 16U) {
-        return SHE_ERC_SIZE;
-    }
-
     sm_block_t tmp_tag;
     // Finish up and generate the tag of a certain size
     gcm_finish(ctx, &tmp_tag);
-    for (uint8_t i = 0; i < tag_length; i++) {
+    for (uint8_t i = 0; i < 16U; i++) {
         tag[i] = tmp_tag.bytes[i];
     }
+    ctx->in_use = false;
 
     return SHE_ERC_NO_ERROR;
 }
 
 ///////////// Classic AEAD API /////////////
+// FIXME change this to specify the context ID and the volatile key ID
 she_errorcode_t sm_enc_aead(sm_key_id_t key_id,
                             sm_block_t *iv,
                             const uint8_t *aad,
@@ -421,12 +434,15 @@ she_errorcode_t sm_enc_aead(sm_key_id_t key_id,
 {
     she_errorcode_t ec;
 
-    ec = sm_set_aead_ctx(key_id, 0);
+    sm_volatile_key_id_t aead_key_id = 0;
+    sm_aead_ctx_id_t aead_ctx_id = 0;
+
+    ec = sm_set_aead_key(key_id, aead_key_id);
     if (ec != SHE_ERC_NO_ERROR) {
         return ec;
     }
 
-    ec = sm_start_aead(0, iv);
+    ec = sm_init_aead_ctx(aead_key_id, aead_ctx_id, iv);
     if (ec != SHE_ERC_NO_ERROR) {
         return ec;
     }
@@ -473,11 +489,12 @@ she_errorcode_t sm_enc_aead(sm_key_id_t key_id,
         ciphertext += len;
     }
 
-    ec = sm_generate_aead_tag(0, tag->bytes, 16U);
+    ec = sm_generate_aead_tag(0, tag->bytes);
 
     return ec;
 }
 
+// FIXME change this to specify the context ID and the volatile key ID
 she_errorcode_t sm_dec_aead(sm_key_id_t key_id,
                             sm_block_t *iv,
                             const uint8_t *aad,
@@ -492,12 +509,16 @@ she_errorcode_t sm_dec_aead(sm_key_id_t key_id,
 {
     she_errorcode_t ec;
 
-    ec = sm_set_aead_ctx(key_id, 0);
+    // FIXME move these to parameters and change test vector code
+    sm_volatile_key_id_t aead_key_id = 0;
+    sm_aead_ctx_id_t aead_ctx_id = 0;
+
+    ec = sm_set_aead_key(key_id, aead_key_id);
     if (ec != SHE_ERC_NO_ERROR) {
         return ec;
     }
 
-    ec = sm_start_aead(0, iv);
+    ec = sm_init_aead_ctx(aead_key_id, aead_ctx_id, iv);
     if (ec != SHE_ERC_NO_ERROR) {
         return ec;
     }
